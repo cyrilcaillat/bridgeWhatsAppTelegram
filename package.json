@@ -1,0 +1,28 @@
+{
+  "name": "bridge-whatsapp-telegram",
+  "version": "1.0.0",
+  "description": "Bidirectional bridge between WhatsApp groups and Telegram topics",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "lint": "node --check src/index.js && node --check src/config.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "telegram",
+    "bridge",
+    "bot"
+  ],
+  "author": "Cyril Caillat",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^0.66.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.1"
+  }
+}
