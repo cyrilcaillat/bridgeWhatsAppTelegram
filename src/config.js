@@ -38,6 +38,9 @@ function loadConfig() {
     tgToken: process.env.TG_TOKEN,
     tgGroupId: process.env.TG_GROUP_ID,
     waGroupToTopic: parseGroupMap(process.env.WA_GROUP_IDS || ""),
+    tgToWaIncludePrefix: parseBool(process.env.TG_TO_WA_INCLUDE_PREFIX, false),
+    tgToWaPrefix: process.env.TG_TO_WA_PREFIX || "[Bridge Telegram]",
+    tgToWaIncludeUsername: parseBool(process.env.TG_TO_WA_INCLUDE_USERNAME, true),
     puppeteerExecutablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     headless: parseBool(process.env.HEADLESS, true),
     logLevel: process.env.LOG_LEVEL || "info"

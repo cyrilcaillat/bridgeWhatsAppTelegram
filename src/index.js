@@ -128,20 +128,26 @@ tg.on("message", async (tgMsg) => {
   if (!waGroupId) return;
 
   const text = tgMsg.text || tgMsg.caption || "";
+  const profileName = [tgMsg.from?.first_name, tgMsg.from?.last_name].filter(Boolean).join(" ").trim();
+  const fromName = profileName || (tgMsg.from?.username ? `@${tgMsg.from.username}` : "Telegram");
+  const senderText = cfg.tgToWaIncludeUsername ? (text ? `${fromName}: ${text}` : fromName) : text;
+  const bridgedText = cfg.tgToWaIncludePrefix
+    ? `${cfg.tgToWaPrefix}${senderText ? ` ${senderText}` : ""}`
+    : senderText;
 
   try {
     if (tgMsg.photo) {
       const fileId = tgMsg.photo[tgMsg.photo.length - 1].file_id;
       const fileUrl = await tg.getFileLink(fileId);
       const media = await MessageMedia.fromUrl(fileUrl);
-      await wa.sendMessage(waGroupId, media, { caption: text });
+      await wa.sendMessage(waGroupId, media, { caption: bridgedText });
     } else if (tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice) {
       const file = tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice;
       const fileUrl = await tg.getFileLink(file.file_id);
       const media = await MessageMedia.fromUrl(fileUrl);
-      await wa.sendMessage(waGroupId, media, { caption: text });
+      await wa.sendMessage(waGroupId, media, { caption: bridgedText });
     } else if (text) {
-      await wa.sendMessage(waGroupId, text);
+      await wa.sendMessage(waGroupId, bridgedText);
     }
   } catch (error) {
     log("error", "Failed to relay message from Telegram to WhatsApp", error.message);
