@@ -183,26 +183,39 @@ Commandes utiles (mode utilisateur):
 ~/.local/bin/pm2 logs bridge-whatsapp-telegram --lines 100 --nostream
 ```
 
-## Etape 7 - Deploiement sur serveur (exemple Debian)
+## Etape 7 - Deploiement sur serveur (Debian)
 
-Depuis votre machine locale:
+### Premier deploiement
+
+Cloner le depot sur le serveur:
 
 ```bash
-rsync -az --delete --exclude '.git' --exclude 'node_modules' ./ debian@6infocom.fr:/home/debian/bridgeWhatsAppTelegram/
-ssh debian@6infocom.fr 'cd /home/debian/bridgeWhatsAppTelegram && npm install --omit=dev'
+git clone https://github.com/cyrilcaillat/bridgeWhatsAppTelegram.git /home/debian/bridgeWhatsAppTelegram
+cd /home/debian/bridgeWhatsAppTelegram
+npm install --omit=dev
 ```
 
-Puis creer/modifier le `.env` distant:
+Creer et remplir le `.env`:
 
 ```bash
-ssh debian@6infocom.fr 'cp -n /home/debian/bridgeWhatsAppTelegram/.env.example /home/debian/bridgeWhatsAppTelegram/.env'
-ssh debian@6infocom.fr 'nano /home/debian/bridgeWhatsAppTelegram/.env'
+cp .env.example .env
+nano .env
 ```
 
-Puis lancer:
+Lancer:
 
 ```bash
-ssh debian@6infocom.fr 'cd /home/debian/bridgeWhatsAppTelegram && ~/.local/bin/pm2 restart bridge-whatsapp-telegram || ~/.local/bin/pm2 start src/index.js --name bridge-whatsapp-telegram'
+~/.local/bin/pm2 start src/index.js --name bridge-whatsapp-telegram
+~/.local/bin/pm2 save
+```
+
+### Mise a jour (deploiement continu)
+
+```bash
+cd /home/debian/bridgeWhatsAppTelegram
+git pull
+npm install --omit=dev
+~/.local/bin/pm2 restart bridge-whatsapp-telegram --update-env
 ```
 
 ## Troubleshooting
