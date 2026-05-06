@@ -39,6 +39,35 @@ function escapeMarkdownV2(text) {
   return text.replace(/[_*\[\]()~`>#+\-=|{}.!]/g, "\\$&");
 }
 
+function getWhatsAppGroups(chats) {
+  return chats.filter((chat) => chat.isGroup);
+}
+
+function writeWhatsAppGroupsFile(groups) {
+  const sortedGroups = [...groups].sort((a, b) => a.name.localeCompare(b.name));
+  const lines = [
+    `Updated: ${new Date().toISOString()}`,
+    "",
+    ...sortedGroups.map((group) => `${group.name} => ${group.id._serialized}`)
+  ];
+
+  fs.mkdirSync(path.dirname(cfg.waGroupsListPath), { recursive: true });
+  fs.writeFileSync(cfg.waGroupsListPath, `${lines.join("\n")}\n`, "utf8");
+}
+
+async function refreshWhatsAppGroupsSnapshot() {
+  const chats = await wa.getChats();
+  const groups = getWhatsAppGroups(chats);
+
+  log("info", "Detected WhatsApp groups:");
+  groups.forEach((group) => {
+    log("info", `${group.name} => ${group.id._serialized}`);
+  });
+
+  writeWhatsAppGroupsFile(groups);
+  log("info", `WhatsApp groups list updated in ${cfg.waGroupsListPath}`);
+}
+
 async function sendToTelegramTopic(topicId, text) {
   return tg.sendMessage(cfg.tgGroupId, text, {
     message_thread_id: topicId,
@@ -80,13 +109,20 @@ wa.on("qr", (qr) => {
 
 wa.on("ready", async () => {
   log("info", "WhatsApp client is ready.");
-  const chats = await wa.getChats();
-  const groups = chats.filter((chat) => chat.isGroup);
+  await refreshWhatsAppGroupsSnapshot();
 
-  log("info", "Detected WhatsApp groups:");
-  groups.forEach((group) => {
-    log("info", `${group.name} => ${group.id._serialized}`);
-  });
+  if (cfg.waGroupsListRefreshMinutes > 0) {
+    const refreshMs = cfg.waGroupsListRefreshMinutes * 60 * 1000;
+    setInterval(async () => {
+      try {
+        await refreshWhatsAppGroupsSnapshot();
+      } catch (error) {
+        log("error", "Failed to refresh WhatsApp groups list", error.message);
+      }
+    }, refreshMs).unref();
+
+    log("info", `WhatsApp groups list refresh enabled every ${cfg.waGroupsListRefreshMinutes} minute(s).`);
+  }
 
   await tg.sendMessage(
     cfg.tgGroupId,
