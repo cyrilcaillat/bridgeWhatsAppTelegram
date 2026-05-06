@@ -130,7 +130,17 @@ Construire `WA_GROUP_IDS` avec les topics Telegram:
 WA_GROUP_IDS=120363123456789012@g.us:101,120363987654321098@g.us:102
 ```
 
-## Etape 5 - Demarrage en production avec PM2
+## Etape 5 - Dependances systeme pour Chromium (Debian/Ubuntu)
+
+Puppeteer/whatsapp-web.js necessite des librairies systeme. Les installer une fois avant le premier lancement:
+
+```bash
+sudo apt-get install -y libnspr4 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+  libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 \
+  libpango-1.0-0 libcairo2 libgtk-3-0 libx11-xcb1
+```
+
+## Etape 6 - Demarrage en production avec PM2
 
 ### Option A - PM2 global (si droits sudo)
 
@@ -150,6 +160,20 @@ npm install -g pm2 --prefix "$HOME/.local"
 "$HOME/.local/bin/pm2" save
 ```
 
+### Demarrage automatique au reboot (mode utilisateur, avec sudo)
+
+Pour que PM2 relance le bridge apres un reboot serveur:
+
+```bash
+sudo env PATH=$PATH:/home/debian/.local/bin:/usr/local/bin pm2 startup systemd -u debian --hp /home/debian
+~/.local/bin/pm2 save
+```
+
+Pour desactiver:
+```bash
+~/.local/bin/pm2 unstartup systemd
+```
+
 Commandes utiles (mode utilisateur):
 
 ```bash
@@ -159,7 +183,7 @@ Commandes utiles (mode utilisateur):
 ~/.local/bin/pm2 logs bridge-whatsapp-telegram --lines 100 --nostream
 ```
 
-## Etape 6 - Deploiement sur serveur (exemple Debian)
+## Etape 7 - Deploiement sur serveur (exemple Debian)
 
 Depuis votre machine locale:
 
