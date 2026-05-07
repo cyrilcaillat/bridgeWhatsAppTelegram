@@ -13,6 +13,16 @@ const { loadConfig } = require("./config");
 const cfg = loadConfig();
 const tg = new TelegramBot(cfg.tgToken, { polling: true });
 const topicToWa = Object.fromEntries(Object.entries(cfg.waGroupToTopic).map(([waId, topicId]) => [String(topicId), waId]));
+const topicCatalog = new Map();
+let lastWhatsAppGroups = [];
+
+Object.entries(cfg.waGroupToTopic).forEach(([waId, topicId]) => {
+  topicCatalog.set(String(topicId), {
+    id: String(topicId),
+    name: null,
+    source: `configured for ${waId}`
+  });
+});
 
 const wa = new Client({
   authStrategy: new LocalAuth({ dataPath: ".session" }),
@@ -43,28 +53,81 @@ function getWhatsAppGroups(chats) {
   return chats.filter((chat) => chat.isGroup);
 }
 
-function writeWhatsAppGroupsFile(groups) {
+function writeSnapshotFile(groups) {
   const sortedGroups = [...groups].sort((a, b) => a.name.localeCompare(b.name));
+  const sortedTopics = [...topicCatalog.values()].sort((a, b) => Number(a.id) - Number(b.id));
   const lines = [
     `Updated: ${new Date().toISOString()}`,
     "",
+    "WhatsApp groups:",
     ...sortedGroups.map((group) => `${group.name} => ${group.id._serialized}`)
   ];
+
+  lines.push("", "Telegram topics:");
+
+  if (sortedTopics.length === 0) {
+    lines.push("(none detected yet)");
+  } else {
+    sortedTopics.forEach((topic) => {
+      const label = topic.name || "(name unknown yet)";
+      const source = topic.source ? ` [${topic.source}]` : "";
+      lines.push(`${label} => ${topic.id}${source}`);
+    });
+  }
 
   fs.mkdirSync(path.dirname(cfg.waGroupsListPath), { recursive: true });
   fs.writeFileSync(cfg.waGroupsListPath, `${lines.join("\n")}\n`, "utf8");
 }
 
+function extractTelegramTopicName(msg) {
+  return msg.forum_topic_created?.name
+    || msg.reply_to_message?.forum_topic_created?.name
+    || null;
+}
+
+function upsertTelegramTopic(topicId, name, source) {
+  const key = String(topicId);
+  const existing = topicCatalog.get(key);
+
+  if (!existing) {
+    topicCatalog.set(key, {
+      id: key,
+      name: name || null,
+      source: source || null
+    });
+    writeSnapshotFile(lastWhatsAppGroups);
+    return;
+  }
+
+  let changed = false;
+
+  if (name && !existing.name) {
+    existing.name = name;
+    changed = true;
+  }
+
+  if (source && existing.source !== source) {
+    existing.source = source;
+    changed = true;
+  }
+
+  if (changed) {
+    topicCatalog.set(key, existing);
+    writeSnapshotFile(lastWhatsAppGroups);
+  }
+}
+
 async function refreshWhatsAppGroupsSnapshot() {
   const chats = await wa.getChats();
   const groups = getWhatsAppGroups(chats);
+  lastWhatsAppGroups = groups;
 
   log("info", "Detected WhatsApp groups:");
   groups.forEach((group) => {
     log("info", `${group.name} => ${group.id._serialized}`);
   });
 
-  writeWhatsAppGroupsFile(groups);
+  writeSnapshotFile(groups);
   log("info", `WhatsApp groups list updated in ${cfg.waGroupsListPath}`);
 }
 
@@ -159,6 +222,9 @@ tg.on("message", async (tgMsg) => {
 
   const topicId = tgMsg.message_thread_id;
   if (!topicId) return;
+
+  const topicName = extractTelegramTopicName(tgMsg);
+  upsertTelegramTopic(topicId, topicName, "detected from Telegram messages");
 
   const waGroupId = topicToWa[String(topicId)];
   if (!waGroupId) return;
