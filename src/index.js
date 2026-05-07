@@ -6,12 +6,12 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const qrcode = require("qrcode-terminal");
-const TelegramBot = require("node-telegram-bot-api");
+const { Telegraf, Input } = require("telegraf");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const { loadConfig } = require("./config");
 
 const cfg = loadConfig();
-const tg = new TelegramBot(cfg.tgToken, { polling: true });
+const tg = new Telegraf(cfg.tgToken);
 const topicToWa = Object.fromEntries(Object.entries(cfg.waGroupToTopic).map(([waId, topicId]) => [String(topicId), waId]));
 const topicCatalog = new Map();
 let lastWhatsAppGroups = [];
@@ -132,7 +132,7 @@ async function refreshWhatsAppGroupsSnapshot() {
 }
 
 async function sendToTelegramTopic(topicId, text) {
-  return tg.sendMessage(cfg.tgGroupId, text, {
+  return tg.telegram.sendMessage(cfg.tgGroupId, text, {
     message_thread_id: topicId,
     parse_mode: "MarkdownV2"
   });
@@ -152,13 +152,13 @@ async function sendMediaToTelegram(topicId, media, caption) {
 
   try {
     if (media.mimetype.startsWith("image/")) {
-      await tg.sendPhoto(cfg.tgGroupId, filePath, opts);
+      await tg.telegram.sendPhoto(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     } else if (media.mimetype.startsWith("video/")) {
-      await tg.sendVideo(cfg.tgGroupId, filePath, opts);
+      await tg.telegram.sendVideo(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     } else if (media.mimetype.startsWith("audio/") || media.mimetype === "application/ogg") {
-      await tg.sendVoice(cfg.tgGroupId, filePath, opts);
+      await tg.telegram.sendVoice(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     } else {
-      await tg.sendDocument(cfg.tgGroupId, filePath, opts);
+      await tg.telegram.sendDocument(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     }
   } finally {
     fs.rmSync(filePath, { force: true });
@@ -187,7 +187,7 @@ wa.on("ready", async () => {
     log("info", `WhatsApp groups list refresh enabled every ${cfg.waGroupsListRefreshMinutes} minute(s).`);
   }
 
-  await tg.sendMessage(
+  await tg.telegram.sendMessage(
     cfg.tgGroupId,
     "Bridge WhatsApp <-> Telegram is running."
   );
@@ -217,7 +217,8 @@ wa.on("message", async (msg) => {
   }
 });
 
-tg.on("message", async (tgMsg) => {
+tg.on("message", async (ctx) => {
+  const tgMsg = ctx.message;
   if (String(tgMsg.chat.id) !== String(cfg.tgGroupId)) return;
 
   const topicId = tgMsg.message_thread_id;
@@ -240,13 +241,13 @@ tg.on("message", async (tgMsg) => {
   try {
     if (tgMsg.photo) {
       const fileId = tgMsg.photo[tgMsg.photo.length - 1].file_id;
-      const fileUrl = await tg.getFileLink(fileId);
-      const media = await MessageMedia.fromUrl(fileUrl);
+      const fileUrl = await tg.telegram.getFileLink(fileId);
+      const media = await MessageMedia.fromUrl(fileUrl.toString());
       await wa.sendMessage(waGroupId, media, { caption: bridgedText });
     } else if (tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice) {
       const file = tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice;
-      const fileUrl = await tg.getFileLink(file.file_id);
-      const media = await MessageMedia.fromUrl(fileUrl);
+      const fileUrl = await tg.telegram.getFileLink(file.file_id);
+      const media = await MessageMedia.fromUrl(fileUrl.toString());
       await wa.sendMessage(waGroupId, media, { caption: bridgedText });
     } else if (text) {
       await wa.sendMessage(waGroupId, bridgedText);
@@ -254,6 +255,23 @@ tg.on("message", async (tgMsg) => {
   } catch (error) {
     log("error", "Failed to relay message from Telegram to WhatsApp", error.message);
   }
+});
+
+tg.catch((error) => {
+  log("error", "Telegram handler error", error.message);
+});
+
+tg.launch().catch((error) => {
+  log("error", "Telegram initialization failed", error.message);
+  process.exitCode = 1;
+});
+
+process.once("SIGINT", () => {
+  tg.stop("SIGINT");
+});
+
+process.once("SIGTERM", () => {
+  tg.stop("SIGTERM");
 });
 
 wa.initialize().catch((error) => {
