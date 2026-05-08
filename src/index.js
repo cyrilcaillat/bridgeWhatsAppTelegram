@@ -14,6 +14,7 @@ const cfg = loadConfig();
 const tg = new Telegraf(cfg.tgToken);
 const topicToWa = Object.fromEntries(Object.entries(cfg.waGroupToTopic).map(([waId, topicId]) => [String(topicId), waId]));
 const topicCatalog = new Map();
+const recentBridgeOutboundMessages = new Map();
 let lastWhatsAppGroups = [];
 
 Object.entries(cfg.waGroupToTopic).forEach(([waId, topicId]) => {
@@ -117,6 +118,78 @@ function upsertTelegramTopic(topicId, name, source) {
   }
 }
 
+function rememberBridgeOutboundMessage(waGroupId, text) {
+  const key = String(waGroupId);
+  const queue = recentBridgeOutboundMessages.get(key) || [];
+
+  queue.push({
+    text: text || "",
+    expiresAt: Date.now() + 2 * 60 * 1000
+  });
+
+  recentBridgeOutboundMessages.set(key, queue);
+}
+
+function isRecentBridgeOutboundMessage(waGroupId, text) {
+  const key = String(waGroupId);
+  const now = Date.now();
+  const queue = (recentBridgeOutboundMessages.get(key) || []).filter((entry) => entry.expiresAt > now);
+
+  if (queue.length === 0) {
+    recentBridgeOutboundMessages.delete(key);
+    return false;
+  }
+
+  const matchIndex = queue.findIndex((entry) => entry.text === (text || ""));
+
+  if (matchIndex === -1) {
+    recentBridgeOutboundMessages.set(key, queue);
+    return false;
+  }
+
+  queue.splice(matchIndex, 1);
+
+  if (queue.length === 0) {
+    recentBridgeOutboundMessages.delete(key);
+  } else {
+    recentBridgeOutboundMessages.set(key, queue);
+  }
+
+  return true;
+}
+
+async function relayWhatsAppMessageToTelegram(msg) {
+  if (!msg.from.endsWith("@g.us")) return;
+
+  const topicId = cfg.waGroupToTopic[msg.from];
+  if (!topicId) return;
+
+  const rawText = msg.body || msg.caption || "";
+
+  if (msg.fromMe && isRecentBridgeOutboundMessage(msg.from, rawText)) {
+    return;
+  }
+
+  try {
+    const contact = await msg.getContact();
+    const sender = msg.fromMe
+      ? (contact.pushname || contact.name || "Me")
+      : (contact.pushname || contact.name || msg.author || "Unknown");
+    const safeSender = escapeMarkdownV2(sender.replace("@c.us", ""));
+    const safeBody = escapeMarkdownV2(rawText);
+    const prefix = `*${safeSender}*`;
+
+    if (msg.hasMedia) {
+      const media = await msg.downloadMedia();
+      await sendMediaToTelegram(topicId, media, safeBody ? `${prefix}\n${safeBody}` : prefix);
+    } else if (rawText) {
+      await sendToTelegramTopic(topicId, `${prefix}\n${safeBody}`);
+    }
+  } catch (error) {
+    log("error", "Failed to relay message from WhatsApp to Telegram", error.message);
+  }
+}
+
 async function refreshWhatsAppGroupsSnapshot() {
   const chats = await wa.getChats();
   const groups = getWhatsAppGroups(chats);
@@ -193,29 +266,7 @@ wa.on("ready", async () => {
   );
 });
 
-wa.on("message", async (msg) => {
-  if (!msg.from.endsWith("@g.us")) return;
-
-  const topicId = cfg.waGroupToTopic[msg.from];
-  if (!topicId) return;
-
-  try {
-    const contact = await msg.getContact();
-    const sender = contact.pushname || contact.name || msg.author || "Unknown";
-    const safeSender = escapeMarkdownV2(sender.replace("@c.us", ""));
-    const safeBody = escapeMarkdownV2(msg.body || "");
-    const prefix = `*${safeSender}*`;
-
-    if (msg.hasMedia) {
-      const media = await msg.downloadMedia();
-      await sendMediaToTelegram(topicId, media, safeBody ? `${prefix}\n${safeBody}` : prefix);
-    } else if (msg.body) {
-      await sendToTelegramTopic(topicId, `${prefix}\n${safeBody}`);
-    }
-  } catch (error) {
-    log("error", "Failed to relay message from WhatsApp to Telegram", error.message);
-  }
-});
+wa.on("message_create", relayWhatsAppMessageToTelegram);
 
 tg.on("message", async (ctx) => {
   const tgMsg = ctx.message;
@@ -243,13 +294,16 @@ tg.on("message", async (ctx) => {
       const fileId = tgMsg.photo[tgMsg.photo.length - 1].file_id;
       const fileUrl = await tg.telegram.getFileLink(fileId);
       const media = await MessageMedia.fromUrl(fileUrl.toString());
+      rememberBridgeOutboundMessage(waGroupId, bridgedText);
       await wa.sendMessage(waGroupId, media, { caption: bridgedText });
     } else if (tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice) {
       const file = tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice;
       const fileUrl = await tg.telegram.getFileLink(file.file_id);
       const media = await MessageMedia.fromUrl(fileUrl.toString());
+      rememberBridgeOutboundMessage(waGroupId, bridgedText);
       await wa.sendMessage(waGroupId, media, { caption: bridgedText });
     } else if (text) {
+      rememberBridgeOutboundMessage(waGroupId, bridgedText);
       await wa.sendMessage(waGroupId, bridgedText);
     }
   } catch (error) {
