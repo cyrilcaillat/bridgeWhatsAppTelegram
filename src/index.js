@@ -59,6 +59,7 @@ function saveState() {
   try {
     const data = {
       topics: Object.fromEntries(topicCatalog),
+      waGroups: lastWhatsAppGroups.map((g) => ({ name: g.name, id: g.id._serialized })),
       messageLinks: {
         waToTg: Object.fromEntries(waToTgMessageLinks),
         tgToWa: Object.fromEntries(tgToWaMessageLinks)
@@ -337,6 +338,7 @@ async function refreshWhatsAppGroupsSnapshot() {
   });
 
   writeSnapshotFile(groups);
+  saveState();
   log("info", `WhatsApp groups list updated in ${cfg.waGroupsListPath}`);
 }
 
