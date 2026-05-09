@@ -293,6 +293,76 @@ function resolveWhatsAppQuotedMessageId(tgMsg, waGroupId) {
   return link.waMessageId;
 }
 
+function extractWaGroupIdFromSerializedMessageId(serializedId) {
+  if (!serializedId) return null;
+  const parts = String(serializedId).split("_");
+  if (parts.length < 2) return null;
+  const maybeGroupId = parts[1];
+  return maybeGroupId.endsWith("@g.us") ? maybeGroupId : null;
+}
+
+function extractWaMessageInfoFromReaction(reaction) {
+  const parentMsgId = reaction?.msgId;
+  if (!parentMsgId) return { waGroupId: null, waMessageId: null };
+
+  const waMessageId = parentMsgId._serialized || null;
+  const waGroupId = parentMsgId.remote?._serialized
+    || parentMsgId.remote
+    || extractWaGroupIdFromSerializedMessageId(waMessageId);
+
+  return {
+    waGroupId: waGroupId ? String(waGroupId) : null,
+    waMessageId: waMessageId ? String(waMessageId) : null
+  };
+}
+
+function extractTelegramEmojiReaction(reactions) {
+  const emojiReaction = (reactions || []).find((entry) => entry?.type === "emoji" && entry?.emoji);
+  return emojiReaction?.emoji || "";
+}
+
+async function relayWhatsAppReactionToTelegram(reaction) {
+  try {
+    const { waGroupId, waMessageId } = extractWaMessageInfoFromReaction(reaction);
+    if (!waGroupId || !waMessageId) return;
+    if (!waGroupId.endsWith("@g.us")) return;
+
+    const topicId = cfg.waGroupToTopic[waGroupId];
+    if (!topicId) return;
+
+    pruneExpiredMessageLinks();
+    const link = waToTgMessageLinks.get(buildWaMessageKey(waGroupId, waMessageId));
+    if (!link?.tgMessageId) return;
+
+    const emoji = reaction?.reaction || "";
+    const tgReaction = emoji ? [{ type: "emoji", emoji }] : [];
+
+    await tg.telegram.setMessageReaction(cfg.tgGroupId, link.tgMessageId, tgReaction);
+  } catch (error) {
+    log("warn", "Failed to relay reaction from WhatsApp to Telegram", error.message);
+  }
+}
+
+async function relayTelegramReactionToWhatsApp(ctx) {
+  const reactionUpdate = ctx.update?.message_reaction;
+  if (!reactionUpdate) return;
+  if (String(reactionUpdate.chat?.id) !== String(cfg.tgGroupId)) return;
+  if (reactionUpdate.user?.is_bot) return;
+
+  pruneExpiredMessageLinks();
+
+  const link = tgToWaMessageLinks.get(buildTgMessageKey(reactionUpdate.message_id));
+  if (!link?.waMessageId) return;
+
+  const emoji = extractTelegramEmojiReaction(reactionUpdate.new_reaction);
+
+  try {
+    await wa.sendReaction(link.waMessageId, emoji);
+  } catch (error) {
+    log("warn", "Failed to relay reaction from Telegram to WhatsApp", error.message);
+  }
+}
+
 async function relayWhatsAppMessageToTelegram(msg) {
   if (!msg.from.endsWith("@g.us")) return;
 
@@ -425,6 +495,7 @@ wa.on("ready", async () => {
 });
 
 wa.on("message_create", relayWhatsAppMessageToTelegram);
+wa.on("message_reaction", relayWhatsAppReactionToTelegram);
 
 tg.on("message", async (ctx) => {
   const tgMsg = ctx.message;
@@ -487,6 +558,8 @@ tg.on("message", async (ctx) => {
     log("error", "Failed to relay message from Telegram to WhatsApp", error.message);
   }
 });
+
+tg.on("message_reaction", relayTelegramReactionToWhatsApp);
 
 tg.catch((error) => {
   log("error", "Telegram handler error", error.message);
