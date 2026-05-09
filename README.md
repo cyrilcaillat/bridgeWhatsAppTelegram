@@ -6,6 +6,7 @@ Bridge bidirectionnel entre des groupes WhatsApp et des topics Telegram.
 
 - Relai WhatsApp -> Telegram
 - Relai Telegram -> WhatsApp
+- Relai des reponses a un message (reply) dans les deux sens
 - Support des medias (photo, video, audio, document)
 - Mapping configurable groupe WhatsApp -> topic Telegram
 - Session WhatsApp persistante

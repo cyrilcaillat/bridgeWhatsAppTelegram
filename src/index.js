@@ -15,7 +15,40 @@ const tg = new Telegraf(cfg.tgToken);
 const topicToWa = Object.fromEntries(Object.entries(cfg.waGroupToTopic).map(([waId, topicId]) => [String(topicId), waId]));
 const topicCatalog = new Map();
 const recentBridgeOutboundMessages = new Map();
+const waToTgMessageLinks = new Map();
+const tgToWaMessageLinks = new Map();
+const MESSAGE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MESSAGE_LINKS_PATH = process.env.MESSAGE_LINKS_PATH || "./message-links.json";
 let lastWhatsAppGroups = [];
+
+function loadMessageLinks() {
+  try {
+    if (!fs.existsSync(MESSAGE_LINKS_PATH)) return;
+    const raw = JSON.parse(fs.readFileSync(MESSAGE_LINKS_PATH, "utf8"));
+    const now = Date.now();
+    for (const [k, v] of Object.entries(raw.waToTg || {})) {
+      if (v.expiresAt > now) waToTgMessageLinks.set(k, v);
+    }
+    for (const [k, v] of Object.entries(raw.tgToWa || {})) {
+      if (v.expiresAt > now) tgToWaMessageLinks.set(k, v);
+    }
+    log("info", `Message links loaded from ${MESSAGE_LINKS_PATH} (${waToTgMessageLinks.size} entries)`);
+  } catch (error) {
+    log("warn", `Failed to load message links from ${MESSAGE_LINKS_PATH}`, error.message);
+  }
+}
+
+function saveMessageLinks() {
+  try {
+    const data = {
+      waToTg: Object.fromEntries(waToTgMessageLinks),
+      tgToWa: Object.fromEntries(tgToWaMessageLinks)
+    };
+    fs.writeFileSync(MESSAGE_LINKS_PATH, JSON.stringify(data), "utf8");
+  } catch (error) {
+    log("warn", `Failed to save message links to ${MESSAGE_LINKS_PATH}`, error.message);
+  }
+}
 
 Object.entries(cfg.waGroupToTopic).forEach(([waId, topicId]) => {
   topicCatalog.set(String(topicId), {
@@ -158,6 +191,81 @@ function isRecentBridgeOutboundMessage(waGroupId, text) {
   return true;
 }
 
+function buildWaMessageKey(waGroupId, waMessageId) {
+  return `${String(waGroupId)}:${String(waMessageId)}`;
+}
+
+function buildTgMessageKey(tgMessageId) {
+  return `${String(cfg.tgGroupId)}:${String(tgMessageId)}`;
+}
+
+function pruneExpiredMessageLinks() {
+  const now = Date.now();
+
+  for (const [key, value] of waToTgMessageLinks.entries()) {
+    if (value.expiresAt <= now) waToTgMessageLinks.delete(key);
+  }
+
+  for (const [key, value] of tgToWaMessageLinks.entries()) {
+    if (value.expiresAt <= now) tgToWaMessageLinks.delete(key);
+  }
+}
+
+function rememberMessageLink(waGroupId, waMessageId, topicId, tgMessageId) {
+  if (!waMessageId || !tgMessageId) return;
+
+  pruneExpiredMessageLinks();
+
+  const expiresAt = Date.now() + MESSAGE_LINK_TTL_MS;
+  const waKey = buildWaMessageKey(waGroupId, waMessageId);
+  const tgKey = buildTgMessageKey(tgMessageId);
+
+  waToTgMessageLinks.set(waKey, {
+    topicId: String(topicId),
+    tgMessageId,
+    expiresAt
+  });
+
+  tgToWaMessageLinks.set(tgKey, {
+    waGroupId: String(waGroupId),
+    waMessageId,
+    expiresAt
+  });
+
+  saveMessageLinks();
+}
+
+async function resolveTelegramReplyMessageId(msg) {
+  if (!msg.hasQuotedMsg) return null;
+
+  try {
+    const quoted = await msg.getQuotedMessage();
+    const quotedWaMessageId = quoted?.id?._serialized;
+    if (!quotedWaMessageId) return null;
+
+    pruneExpiredMessageLinks();
+
+    const link = waToTgMessageLinks.get(buildWaMessageKey(msg.from, quotedWaMessageId));
+    return link?.tgMessageId || null;
+  } catch (error) {
+    log("debug", "Failed to resolve Telegram reply target from WhatsApp message", error.message);
+    return null;
+  }
+}
+
+function resolveWhatsAppQuotedMessageId(tgMsg, waGroupId) {
+  const replied = tgMsg.reply_to_message;
+  if (!replied?.message_id) return null;
+
+  pruneExpiredMessageLinks();
+
+  const link = tgToWaMessageLinks.get(buildTgMessageKey(replied.message_id));
+  if (!link) return null;
+  if (String(link.waGroupId) !== String(waGroupId)) return null;
+
+  return link.waMessageId;
+}
+
 async function relayWhatsAppMessageToTelegram(msg) {
   if (!msg.from.endsWith("@g.us")) return;
 
@@ -171,6 +279,7 @@ async function relayWhatsAppMessageToTelegram(msg) {
   }
 
   try {
+    const replyToMessageId = await resolveTelegramReplyMessageId(msg);
     const contact = await msg.getContact();
     const sender = msg.fromMe
       ? (contact.pushname || contact.name || "Me")
@@ -178,12 +287,17 @@ async function relayWhatsAppMessageToTelegram(msg) {
     const safeSender = escapeMarkdownV2(sender.replace("@c.us", ""));
     const safeBody = escapeMarkdownV2(rawText);
     const prefix = `*${safeSender}*`;
+    let sentTelegramMessage = null;
 
     if (msg.hasMedia) {
       const media = await msg.downloadMedia();
-      await sendMediaToTelegram(topicId, media, safeBody ? `${prefix}\n${safeBody}` : prefix);
+      sentTelegramMessage = await sendMediaToTelegram(topicId, media, safeBody ? `${prefix}\n${safeBody}` : prefix, replyToMessageId);
     } else if (rawText) {
-      await sendToTelegramTopic(topicId, `${prefix}\n${safeBody}`);
+      sentTelegramMessage = await sendToTelegramTopic(topicId, `${prefix}\n${safeBody}`, replyToMessageId);
+    }
+
+    if (sentTelegramMessage?.message_id && msg.id?._serialized) {
+      rememberMessageLink(msg.from, msg.id._serialized, topicId, sentTelegramMessage.message_id);
     }
   } catch (error) {
     log("error", "Failed to relay message from WhatsApp to Telegram", error.message);
@@ -204,14 +318,15 @@ async function refreshWhatsAppGroupsSnapshot() {
   log("info", `WhatsApp groups list updated in ${cfg.waGroupsListPath}`);
 }
 
-async function sendToTelegramTopic(topicId, text) {
+async function sendToTelegramTopic(topicId, text, replyToMessageId) {
   return tg.telegram.sendMessage(cfg.tgGroupId, text, {
     message_thread_id: topicId,
+    reply_to_message_id: replyToMessageId || undefined,
     parse_mode: "MarkdownV2"
   });
 }
 
-async function sendMediaToTelegram(topicId, media, caption) {
+async function sendMediaToTelegram(topicId, media, caption, replyToMessageId) {
   const ext = media.mimetype.split("/")[1]?.split(";")[0] || "bin";
   const filePath = path.join(os.tmpdir(), `wa-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
 
@@ -219,19 +334,20 @@ async function sendMediaToTelegram(topicId, media, caption) {
 
   const opts = {
     message_thread_id: topicId,
+    reply_to_message_id: replyToMessageId || undefined,
     caption,
     parse_mode: "MarkdownV2"
   };
 
   try {
     if (media.mimetype.startsWith("image/")) {
-      await tg.telegram.sendPhoto(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await tg.telegram.sendPhoto(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     } else if (media.mimetype.startsWith("video/")) {
-      await tg.telegram.sendVideo(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await tg.telegram.sendVideo(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     } else if (media.mimetype.startsWith("audio/") || media.mimetype === "application/ogg") {
-      await tg.telegram.sendVoice(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await tg.telegram.sendVoice(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     } else {
-      await tg.telegram.sendDocument(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await tg.telegram.sendDocument(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     }
   } finally {
     fs.rmSync(filePath, { force: true });
@@ -249,6 +365,8 @@ async function sendWhatsAppReadReceiptIfEnabled(waGroupId, tgMsg) {
     log("warn", `Failed to send read receipt to WhatsApp group ${waGroupId}`, error.message);
   }
 }
+
+loadMessageLinks();
 
 wa.on("qr", (qr) => {
   qrcode.generate(qr, { small: true });
@@ -302,23 +420,40 @@ tg.on("message", async (ctx) => {
   const bridgedText = cfg.tgToWaIncludePrefix
     ? `${cfg.tgToWaPrefix}${senderText ? ` ${senderText}` : ""}`
     : senderText;
+  const quotedMessageId = resolveWhatsAppQuotedMessageId(tgMsg, waGroupId);
 
   try {
+    let sentWhatsAppMessage = null;
+
     if (tgMsg.photo) {
       const fileId = tgMsg.photo[tgMsg.photo.length - 1].file_id;
       const fileUrl = await tg.telegram.getFileLink(fileId);
       const media = await MessageMedia.fromUrl(fileUrl.toString());
       rememberBridgeOutboundMessage(waGroupId, bridgedText);
-      await wa.sendMessage(waGroupId, media, { caption: bridgedText });
+      sentWhatsAppMessage = await wa.sendMessage(waGroupId, media, {
+        caption: bridgedText,
+        quotedMessageId: quotedMessageId || undefined
+      });
     } else if (tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice) {
       const file = tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice;
       const fileUrl = await tg.telegram.getFileLink(file.file_id);
       const media = await MessageMedia.fromUrl(fileUrl.toString());
       rememberBridgeOutboundMessage(waGroupId, bridgedText);
-      await wa.sendMessage(waGroupId, media, { caption: bridgedText });
+      sentWhatsAppMessage = await wa.sendMessage(waGroupId, media, {
+        caption: bridgedText,
+        quotedMessageId: quotedMessageId || undefined
+      });
     } else if (text) {
       rememberBridgeOutboundMessage(waGroupId, bridgedText);
-      await wa.sendMessage(waGroupId, bridgedText);
+      sentWhatsAppMessage = await wa.sendMessage(
+        waGroupId,
+        bridgedText,
+        quotedMessageId ? { quotedMessageId } : undefined
+      );
+    }
+
+    if (sentWhatsAppMessage?.id?._serialized && tgMsg.message_id) {
+      rememberMessageLink(waGroupId, sentWhatsAppMessage.id._serialized, topicId, tgMsg.message_id);
     }
   } catch (error) {
     log("error", "Failed to relay message from Telegram to WhatsApp", error.message);
