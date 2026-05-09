@@ -352,12 +352,16 @@ async function relayTelegramReactionToWhatsApp(ctx) {
   pruneExpiredMessageLinks();
 
   const link = tgToWaMessageLinks.get(buildTgMessageKey(reactionUpdate.message_id));
-  if (!link?.waMessageId) return;
+  if (!link?.waMessageId) {
+    log("debug", `No WA mapping found for Telegram reaction target message ${reactionUpdate.message_id}`);
+    return;
+  }
 
   const emoji = extractTelegramEmojiReaction(reactionUpdate.new_reaction);
 
   try {
     await wa.sendReaction(link.waMessageId, emoji);
+    log("debug", `Reaction relayed Telegram -> WhatsApp for message ${reactionUpdate.message_id}`);
   } catch (error) {
     log("warn", "Failed to relay reaction from Telegram to WhatsApp", error.message);
   }
@@ -565,7 +569,9 @@ tg.catch((error) => {
   log("error", "Telegram handler error", error.message);
 });
 
-tg.launch().catch((error) => {
+tg.launch({
+  allowedUpdates: ["message", "message_reaction"]
+}).catch((error) => {
   log("error", "Telegram initialization failed", error.message);
   process.exitCode = 1;
 });
