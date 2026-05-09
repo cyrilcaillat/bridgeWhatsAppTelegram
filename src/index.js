@@ -19,6 +19,7 @@ const waToTgMessageLinks = new Map();
 const tgToWaMessageLinks = new Map();
 const MESSAGE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MESSAGE_LINKS_PATH = process.env.MESSAGE_LINKS_PATH || "./message-links.json";
+const TOPIC_CATALOG_PATH = process.env.TOPIC_CATALOG_PATH || "./telegram-topics.json";
 let lastWhatsAppGroups = [];
 
 function loadMessageLinks() {
@@ -50,6 +51,39 @@ function saveMessageLinks() {
   }
 }
 
+function loadTopicCatalog() {
+  try {
+    if (!fs.existsSync(TOPIC_CATALOG_PATH)) return;
+    const raw = JSON.parse(fs.readFileSync(TOPIC_CATALOG_PATH, "utf8"));
+    let loaded = 0;
+    for (const [key, entry] of Object.entries(raw)) {
+      const existing = topicCatalog.get(key);
+      if (existing) {
+        if (entry.name && !existing.name) {
+          existing.name = entry.name;
+          topicCatalog.set(key, existing);
+          loaded++;
+        }
+      } else {
+        topicCatalog.set(key, { id: key, name: entry.name || null, source: entry.source || null });
+        loaded++;
+      }
+    }
+    log("info", `Topic catalog loaded from ${TOPIC_CATALOG_PATH} (${loaded} entries merged)`);
+  } catch (error) {
+    log("warn", `Failed to load topic catalog from ${TOPIC_CATALOG_PATH}`, error.message);
+  }
+}
+
+function saveTopicCatalog() {
+  try {
+    const data = Object.fromEntries(topicCatalog);
+    fs.writeFileSync(TOPIC_CATALOG_PATH, JSON.stringify(data), "utf8");
+  } catch (error) {
+    log("warn", `Failed to save topic catalog to ${TOPIC_CATALOG_PATH}`, error.message);
+  }
+}
+
 Object.entries(cfg.waGroupToTopic).forEach(([waId, topicId]) => {
   topicCatalog.set(String(topicId), {
     id: String(topicId),
@@ -57,6 +91,8 @@ Object.entries(cfg.waGroupToTopic).forEach(([waId, topicId]) => {
     source: `configured for ${waId}`
   });
 });
+
+loadTopicCatalog();
 
 const wa = new Client({
   authStrategy: new LocalAuth({ dataPath: ".session" }),
@@ -129,6 +165,7 @@ function upsertTelegramTopic(topicId, name, source) {
       name: name || null,
       source: source || null
     });
+    saveTopicCatalog();
     writeSnapshotFile(lastWhatsAppGroups);
     return;
   }
@@ -147,6 +184,7 @@ function upsertTelegramTopic(topicId, name, source) {
 
   if (changed) {
     topicCatalog.set(key, existing);
+    saveTopicCatalog();
     writeSnapshotFile(lastWhatsAppGroups);
   }
 }
