@@ -238,6 +238,18 @@ async function sendMediaToTelegram(topicId, media, caption) {
   }
 }
 
+async function sendWhatsAppReadReceiptIfEnabled(waGroupId, tgMsg) {
+  if (!cfg.tgToWaSendReadReceiptOnActivity) return;
+  if (tgMsg.from?.is_bot) return;
+
+  try {
+    await wa.sendSeen(waGroupId);
+    log("debug", `Read receipt sent to WhatsApp group ${waGroupId}`);
+  } catch (error) {
+    log("warn", `Failed to send read receipt to WhatsApp group ${waGroupId}`, error.message);
+  }
+}
+
 wa.on("qr", (qr) => {
   qrcode.generate(qr, { small: true });
   log("info", "Scan the QR code in WhatsApp > Linked devices.");
@@ -280,6 +292,8 @@ tg.on("message", async (ctx) => {
 
   const waGroupId = topicToWa[String(topicId)];
   if (!waGroupId) return;
+
+  await sendWhatsAppReadReceiptIfEnabled(waGroupId, tgMsg);
 
   const text = tgMsg.text || tgMsg.caption || "";
   const profileName = [tgMsg.from?.first_name, tgMsg.from?.last_name].filter(Boolean).join(" ").trim();
