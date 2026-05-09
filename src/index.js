@@ -44,7 +44,7 @@ function loadState() {
           topicsLoaded++;
         }
       } else {
-        topicCatalog.set(key, { id: key, name: entry.name || null, source: entry.source || null });
+        topicCatalog.set(key, { id: key, name: entry.name || null, source: null });
         topicsLoaded++;
       }
     }
@@ -57,8 +57,12 @@ function loadState() {
 
 function saveState() {
   try {
+    const topics = Object.fromEntries(
+      [...topicCatalog.entries()].map(([key, entry]) => [key, { id: entry.id, name: entry.name || null }])
+    );
+
     const data = {
-      topics: Object.fromEntries(topicCatalog),
+      topics,
       waGroups: lastWhatsAppGroups.map((g) => ({ name: g.name, id: g.id._serialized })),
       messageLinks: {
         waToTg: Object.fromEntries(waToTgMessageLinks),
