@@ -222,6 +222,25 @@ function buildWaMessageKey(waGroupId, waMessageId) {
   return `${String(waGroupId)}:${String(waMessageId)}`;
 }
 
+function extractWaStableMessageId(waMessageIdOrObject) {
+  if (!waMessageIdOrObject) return null;
+
+  if (typeof waMessageIdOrObject === "object") {
+    if (waMessageIdOrObject.id) return String(waMessageIdOrObject.id);
+    if (waMessageIdOrObject._serialized) return extractWaStableMessageId(waMessageIdOrObject._serialized);
+    return null;
+  }
+
+  const serialized = String(waMessageIdOrObject);
+  const parts = serialized.split("_");
+
+  if (parts.length >= 3 && (parts[0] === "true" || parts[0] === "false")) {
+    return parts[2] || null;
+  }
+
+  return null;
+}
+
 function buildTgMessageKey(tgMessageId) {
   return `${String(cfg.tgGroupId)}:${String(tgMessageId)}`;
 }
@@ -238,7 +257,7 @@ function pruneExpiredMessageLinks() {
   }
 }
 
-function rememberMessageLink(waGroupId, waMessageId, topicId, tgMessageId) {
+function rememberMessageLink(waGroupId, waMessageId, topicId, tgMessageId, waStableMessageId) {
   if (!waMessageId || !tgMessageId) return;
 
   pruneExpiredMessageLinks();
@@ -246,12 +265,21 @@ function rememberMessageLink(waGroupId, waMessageId, topicId, tgMessageId) {
   const expiresAt = Date.now() + MESSAGE_LINK_TTL_MS;
   const waKey = buildWaMessageKey(waGroupId, waMessageId);
   const tgKey = buildTgMessageKey(tgMessageId);
+  const stableId = waStableMessageId || extractWaStableMessageId(waMessageId);
 
   waToTgMessageLinks.set(waKey, {
     topicId: String(topicId),
     tgMessageId,
     expiresAt
   });
+
+  if (stableId) {
+    waToTgMessageLinks.set(buildWaMessageKey(waGroupId, `id:${stableId}`), {
+      topicId: String(topicId),
+      tgMessageId,
+      expiresAt
+    });
+  }
 
   tgToWaMessageLinks.set(tgKey, {
     waGroupId: String(waGroupId),
@@ -272,7 +300,9 @@ async function resolveTelegramReplyMessageId(msg) {
 
     pruneExpiredMessageLinks();
 
-    const link = waToTgMessageLinks.get(buildWaMessageKey(msg.from, quotedWaMessageId));
+    const quotedStableId = extractWaStableMessageId(quoted);
+    const link = waToTgMessageLinks.get(buildWaMessageKey(msg.from, quotedWaMessageId))
+      || (quotedStableId ? waToTgMessageLinks.get(buildWaMessageKey(msg.from, `id:${quotedStableId}`)) : null);
     return link?.tgMessageId || null;
   } catch (error) {
     log("debug", "Failed to resolve Telegram reply target from WhatsApp message", error.message);
@@ -331,7 +361,9 @@ async function relayWhatsAppReactionToTelegram(reaction) {
     if (!topicId) return;
 
     pruneExpiredMessageLinks();
-    const link = waToTgMessageLinks.get(buildWaMessageKey(waGroupId, waMessageId));
+    const stableId = extractWaStableMessageId(reaction?.msgId);
+    const link = waToTgMessageLinks.get(buildWaMessageKey(waGroupId, waMessageId))
+      || (stableId ? waToTgMessageLinks.get(buildWaMessageKey(waGroupId, `id:${stableId}`)) : null);
     if (!link?.tgMessageId) return;
 
     const emoji = reaction?.reaction || "";
@@ -398,7 +430,7 @@ async function relayWhatsAppMessageToTelegram(msg) {
     }
 
     if (sentTelegramMessage?.message_id && msg.id?._serialized) {
-      rememberMessageLink(msg.from, msg.id._serialized, topicId, sentTelegramMessage.message_id);
+      rememberMessageLink(msg.from, msg.id._serialized, topicId, sentTelegramMessage.message_id, msg.id?.id);
     }
   } catch (error) {
     log("error", "Failed to relay message from WhatsApp to Telegram", error.message);
@@ -556,7 +588,7 @@ tg.on("message", async (ctx) => {
     }
 
     if (sentWhatsAppMessage?.id?._serialized && tgMsg.message_id) {
-      rememberMessageLink(waGroupId, sentWhatsAppMessage.id._serialized, topicId, tgMsg.message_id);
+      rememberMessageLink(waGroupId, sentWhatsAppMessage.id._serialized, topicId, tgMsg.message_id, sentWhatsAppMessage.id?.id);
     }
   } catch (error) {
     log("error", "Failed to relay message from Telegram to WhatsApp", error.message);
