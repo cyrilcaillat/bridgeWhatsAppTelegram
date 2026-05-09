@@ -18,69 +18,55 @@ const recentBridgeOutboundMessages = new Map();
 const waToTgMessageLinks = new Map();
 const tgToWaMessageLinks = new Map();
 const MESSAGE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const MESSAGE_LINKS_PATH = process.env.MESSAGE_LINKS_PATH || "./message-links.json";
-const TOPIC_CATALOG_PATH = process.env.TOPIC_CATALOG_PATH || "./telegram-topics.json";
+const BRIDGE_STATE_PATH = process.env.BRIDGE_STATE_PATH || "./bridge-state.json";
 let lastWhatsAppGroups = [];
 
-function loadMessageLinks() {
+function loadState() {
   try {
-    if (!fs.existsSync(MESSAGE_LINKS_PATH)) return;
-    const raw = JSON.parse(fs.readFileSync(MESSAGE_LINKS_PATH, "utf8"));
+    if (!fs.existsSync(BRIDGE_STATE_PATH)) return;
+    const raw = JSON.parse(fs.readFileSync(BRIDGE_STATE_PATH, "utf8"));
     const now = Date.now();
-    for (const [k, v] of Object.entries(raw.waToTg || {})) {
+
+    for (const [k, v] of Object.entries(raw.messageLinks?.waToTg || {})) {
       if (v.expiresAt > now) waToTgMessageLinks.set(k, v);
     }
-    for (const [k, v] of Object.entries(raw.tgToWa || {})) {
+    for (const [k, v] of Object.entries(raw.messageLinks?.tgToWa || {})) {
       if (v.expiresAt > now) tgToWaMessageLinks.set(k, v);
     }
-    log("info", `Message links loaded from ${MESSAGE_LINKS_PATH} (${waToTgMessageLinks.size} entries)`);
-  } catch (error) {
-    log("warn", `Failed to load message links from ${MESSAGE_LINKS_PATH}`, error.message);
-  }
-}
 
-function saveMessageLinks() {
-  try {
-    const data = {
-      waToTg: Object.fromEntries(waToTgMessageLinks),
-      tgToWa: Object.fromEntries(tgToWaMessageLinks)
-    };
-    fs.writeFileSync(MESSAGE_LINKS_PATH, JSON.stringify(data), "utf8");
-  } catch (error) {
-    log("warn", `Failed to save message links to ${MESSAGE_LINKS_PATH}`, error.message);
-  }
-}
-
-function loadTopicCatalog() {
-  try {
-    if (!fs.existsSync(TOPIC_CATALOG_PATH)) return;
-    const raw = JSON.parse(fs.readFileSync(TOPIC_CATALOG_PATH, "utf8"));
-    let loaded = 0;
-    for (const [key, entry] of Object.entries(raw)) {
+    let topicsLoaded = 0;
+    for (const [key, entry] of Object.entries(raw.topics || {})) {
       const existing = topicCatalog.get(key);
       if (existing) {
         if (entry.name && !existing.name) {
           existing.name = entry.name;
           topicCatalog.set(key, existing);
-          loaded++;
+          topicsLoaded++;
         }
       } else {
         topicCatalog.set(key, { id: key, name: entry.name || null, source: entry.source || null });
-        loaded++;
+        topicsLoaded++;
       }
     }
-    log("info", `Topic catalog loaded from ${TOPIC_CATALOG_PATH} (${loaded} entries merged)`);
+
+    log("info", `State loaded from ${BRIDGE_STATE_PATH} (${waToTgMessageLinks.size} message links, ${topicsLoaded} topics)`);
   } catch (error) {
-    log("warn", `Failed to load topic catalog from ${TOPIC_CATALOG_PATH}`, error.message);
+    log("warn", `Failed to load state from ${BRIDGE_STATE_PATH}`, error.message);
   }
 }
 
-function saveTopicCatalog() {
+function saveState() {
   try {
-    const data = Object.fromEntries(topicCatalog);
-    fs.writeFileSync(TOPIC_CATALOG_PATH, JSON.stringify(data), "utf8");
+    const data = {
+      topics: Object.fromEntries(topicCatalog),
+      messageLinks: {
+        waToTg: Object.fromEntries(waToTgMessageLinks),
+        tgToWa: Object.fromEntries(tgToWaMessageLinks)
+      }
+    };
+    fs.writeFileSync(BRIDGE_STATE_PATH, JSON.stringify(data), "utf8");
   } catch (error) {
-    log("warn", `Failed to save topic catalog to ${TOPIC_CATALOG_PATH}`, error.message);
+    log("warn", `Failed to save state to ${BRIDGE_STATE_PATH}`, error.message);
   }
 }
 
@@ -91,8 +77,6 @@ Object.entries(cfg.waGroupToTopic).forEach(([waId, topicId]) => {
     source: `configured for ${waId}`
   });
 });
-
-loadTopicCatalog();
 
 const wa = new Client({
   authStrategy: new LocalAuth({ dataPath: ".session" }),
@@ -165,7 +149,7 @@ function upsertTelegramTopic(topicId, name, source) {
       name: name || null,
       source: source || null
     });
-    saveTopicCatalog();
+    saveState();
     writeSnapshotFile(lastWhatsAppGroups);
     return;
   }
@@ -184,7 +168,7 @@ function upsertTelegramTopic(topicId, name, source) {
 
   if (changed) {
     topicCatalog.set(key, existing);
-    saveTopicCatalog();
+    saveState();
     writeSnapshotFile(lastWhatsAppGroups);
   }
 }
@@ -270,7 +254,7 @@ function rememberMessageLink(waGroupId, waMessageId, topicId, tgMessageId) {
     expiresAt
   });
 
-  saveMessageLinks();
+  saveState();
 }
 
 async function resolveTelegramReplyMessageId(msg) {
@@ -404,7 +388,7 @@ async function sendWhatsAppReadReceiptIfEnabled(waGroupId, tgMsg) {
   }
 }
 
-loadMessageLinks();
+loadState();
 
 wa.on("qr", (qr) => {
   qrcode.generate(qr, { small: true });
