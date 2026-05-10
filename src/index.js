@@ -353,6 +353,19 @@ function shouldProcessWaMessage(msg) {
   return true;
 }
 
+function summarizeWaMessage(msg) {
+  return {
+    id: msg?.id?._serialized || null,
+    from: msg?.from || null,
+    to: msg?.to || null,
+    author: msg?.author || null,
+    fromMe: Boolean(msg?.fromMe),
+    type: msg?.type || null,
+    hasMedia: Boolean(msg?.hasMedia),
+    bodyLength: (msg?.body || msg?.caption || "").length
+  };
+}
+
 function isDetachedFrameError(error) {
   return String(error?.message || "").includes("detached Frame");
 }
@@ -538,24 +551,39 @@ async function relayTelegramReactionToWhatsApp(ctx) {
   }
 }
 
-async function relayWhatsAppMessageToTelegram(msg) {
+async function relayWhatsAppMessageToTelegram(msg, source = "unknown") {
+  log("debug", "WA->TG event received", { source, ...summarizeWaMessage(msg) });
+
   const waGroupId = msg.from?.endsWith("@g.us")
     ? msg.from
     : (msg.to?.endsWith("@g.us") ? msg.to : null);
-  if (!waGroupId) return;
-
-  const topicId = cfg.waGroupToTopic[waGroupId];
-  if (!topicId) return;
-
-  const rawText = msg.body || msg.caption || "";
-  const hasRelayablePayload = msg.hasMedia || Boolean(rawText);
-  if (!hasRelayablePayload) return;
-
-  if (msg.fromMe && isRecentBridgeOutboundMessage(waGroupId, rawText)) {
+  if (!waGroupId) {
+    log("debug", "WA->TG skip: message is not tied to a mapped group", { source, ...summarizeWaMessage(msg) });
     return;
   }
 
-  if (!shouldProcessWaMessage(msg)) return;
+  const topicId = cfg.waGroupToTopic[waGroupId];
+  if (!topicId) {
+    log("debug", "WA->TG skip: group not mapped", { source, waGroupId, ...summarizeWaMessage(msg) });
+    return;
+  }
+
+  const rawText = msg.body || msg.caption || "";
+  const hasRelayablePayload = msg.hasMedia || Boolean(rawText);
+  if (!hasRelayablePayload) {
+    log("debug", "WA->TG skip: no relayable payload", { source, waGroupId, ...summarizeWaMessage(msg) });
+    return;
+  }
+
+  if (msg.fromMe && isRecentBridgeOutboundMessage(waGroupId, rawText)) {
+    log("debug", "WA->TG skip: detected recent bridge outbound echo", { source, waGroupId, ...summarizeWaMessage(msg) });
+    return;
+  }
+
+  if (!shouldProcessWaMessage(msg)) {
+    log("debug", "WA->TG skip: duplicate event id in debounce window", { source, waGroupId, ...summarizeWaMessage(msg) });
+    return;
+  }
 
   try {
     const replyToMessageId = await resolveTelegramReplyMessageId(msg);
@@ -582,8 +610,23 @@ async function relayWhatsAppMessageToTelegram(msg) {
     if (sentTelegramMessage?.message_id && msg.id?._serialized) {
       rememberMessageLink(waGroupId, msg.id._serialized, topicId, sentTelegramMessage.message_id, msg.id?.id);
     }
+
+    log("debug", "WA->TG relayed", {
+      source,
+      waGroupId,
+      topicId,
+      waMessageId: msg.id?._serialized || null,
+      tgMessageId: sentTelegramMessage?.message_id || null,
+      ...summarizeWaMessage(msg)
+    });
   } catch (error) {
-    log("error", "Failed to relay message from WhatsApp to Telegram", error.message);
+    log("error", "Failed to relay message from WhatsApp to Telegram", {
+      source,
+      waGroupId,
+      topicId,
+      message: error.message,
+      ...summarizeWaMessage(msg)
+    });
   }
 }
 
@@ -710,8 +753,8 @@ wa.on("ready", async () => {
   );
 });
 
-wa.on("message_create", relayWhatsAppMessageToTelegram);
-wa.on("message", relayWhatsAppMessageToTelegram);
+wa.on("message_create", (msg) => relayWhatsAppMessageToTelegram(msg, "message_create"));
+wa.on("message", (msg) => relayWhatsAppMessageToTelegram(msg, "message"));
 wa.on("message_reaction", relayWhatsAppReactionToTelegram);
 wa.on("disconnected", (reason) => {
   log("warn", "WhatsApp disconnected", reason);
