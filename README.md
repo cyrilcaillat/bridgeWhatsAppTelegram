@@ -235,6 +235,47 @@ rm -rf .session
 npm start
 ```
 
+### Afficher le QR code depuis le serveur (PM2)
+
+Si le bridge tourne sur le serveur avec PM2, vous pouvez re-afficher le dernier QR code genere via les logs:
+
+```bash
+ssh debian@6infocom.fr 'python3 - <<"PY"
+from pathlib import Path
+
+p = Path("/home/debian/.pm2/logs/bridge-whatsapp-telegram-out.log")
+lines = p.read_text(errors="ignore").splitlines()
+marker = "[INFO] Scan the QR code in WhatsApp > Linked devices."
+idx = max((i for i, l in enumerate(lines) if marker in l), default=-1)
+
+if idx == -1:
+  print("QR introuvable dans les logs.")
+  raise SystemExit(0)
+
+qr_chars = set(" ▀▄█")
+start = idx - 1
+while start >= 0:
+  s = lines[start]
+  if s == "":
+    start -= 1
+    continue
+  if set(s) <= qr_chars and len(s) >= 20:
+    start -= 1
+    continue
+  break
+
+start += 1
+block = [l for l in lines[start:idx] if l.strip() and set(l) <= qr_chars and len(l) >= 20]
+
+if not block:
+  print("QR introuvable dans les logs.")
+else:
+  print("\n".join(block))
+PY'
+```
+
+Ensuite, scanner ce QR dans WhatsApp: `Appareils lies` -> `Lier un appareil`.
+
 ### Erreur "Missing environment variables: TG_TOKEN, TG_GROUP_ID"
 
 - Verifier que le fichier `.env` existe bien au bon emplacement
