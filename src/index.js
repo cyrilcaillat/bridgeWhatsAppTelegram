@@ -5,6 +5,7 @@ require("dotenv").config();
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const qrcode = require("qrcode-terminal");
 const { Telegraf, Input } = require("telegraf");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
@@ -15,8 +16,164 @@ const tg = new Telegraf(cfg.tgToken);
 const topicToWa = Object.fromEntries(Object.entries(cfg.waGroupToTopic).map(([waId, topicId]) => [String(topicId), waId]));
 const topicCatalog = new Map();
 const recentBridgeOutboundMessages = new Map();
+const waToTgMessageLinks = new Map();
+const tgToWaMessageLinks = new Map();
 const recentProcessedWaMessages = new Map();
+const waUserDisplayMap = new Map();
+const WA_USER_MAPPING_NONE = "none";
+const MESSAGE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const PROCESSED_WA_MESSAGE_TTL_MS = 5 * 60 * 1000;
+const RECENT_OUTBOUND_TTL_MS = 2 * 60 * 1000;
+const WA_RECONNECT_DELAY_MS = 5000;
+const WA_RECONNECT_RETRY_DELAY_MS = 15000;
+const BRIDGE_STATE_PATH = process.env.BRIDGE_STATE_PATH || "./bridge-state.json";
 let lastWhatsAppGroups = [];
+let waReconnectTimer = null;
+let waReconnectInProgress = false;
+let loadedStateSignature = null;
+
+function computeStateSignature(raw) {
+  return crypto.createHash("sha1").update(String(raw || "")).digest("hex");
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function normalizeString(value) {
+  return isNonEmptyString(value) ? value.trim() : "";
+}
+
+function readStateFromDisk() {
+  if (!fs.existsSync(BRIDGE_STATE_PATH)) return null;
+
+  const raw = fs.readFileSync(BRIDGE_STATE_PATH, "utf8");
+  return {
+    parsed: JSON.parse(raw),
+    signature: computeStateSignature(raw)
+  };
+}
+
+function loadState() {
+  try {
+    const diskState = readStateFromDisk();
+    if (!diskState) return;
+
+    const raw = diskState.parsed;
+    const now = Date.now();
+    loadedStateSignature = diskState.signature;
+
+    for (const [k, v] of Object.entries(raw.messageLinks?.waToTg || {})) {
+      if (v.expiresAt > now) waToTgMessageLinks.set(k, v);
+    }
+    for (const [k, v] of Object.entries(raw.messageLinks?.tgToWa || {})) {
+      if (v.expiresAt > now) tgToWaMessageLinks.set(k, v);
+    }
+
+    let topicsLoaded = 0;
+    for (const [key, entry] of Object.entries(raw.topics || {})) {
+      const existing = topicCatalog.get(key);
+      if (existing) {
+        if (entry.name && !existing.name) {
+          existing.name = entry.name;
+          topicCatalog.set(key, existing);
+          topicsLoaded++;
+        }
+      } else {
+        topicCatalog.set(key, { id: key, name: entry.name || null, source: null });
+        topicsLoaded++;
+      }
+    }
+
+    let waUserMappingsLoaded = 0;
+    for (const [jid, displayName] of Object.entries(raw.waUserMappings || {})) {
+      const normalizedName = normalizeString(displayName);
+      if (!jid || !normalizedName) continue;
+      waUserDisplayMap.set(String(jid), normalizedName);
+      waUserMappingsLoaded++;
+    }
+
+    log("info", `State loaded from ${BRIDGE_STATE_PATH} (${waToTgMessageLinks.size} message links, ${topicsLoaded} topics, ${waUserMappingsLoaded} user mappings)`);
+  } catch (error) {
+    log("warn", `Failed to load state from ${BRIDGE_STATE_PATH}`, error.message);
+  }
+}
+
+function saveState() {
+  try {
+    let diskState = null;
+    try {
+      diskState = readStateFromDisk();
+    } catch (error) {
+      log("warn", `Failed to read current state from ${BRIDGE_STATE_PATH} before save`, error.message);
+    }
+
+    if (diskState && loadedStateSignature && diskState.signature !== loadedStateSignature) {
+      log("warn", `State file changed on disk since load; applying safe merge for ${BRIDGE_STATE_PATH}`);
+    }
+
+    const mergedWaUserMappings = new Map(waUserDisplayMap);
+    for (const [jid, displayName] of Object.entries(diskState?.parsed?.waUserMappings || {})) {
+      const normalizedName = normalizeString(displayName);
+      if (!jid || !normalizedName) continue;
+      // Keep manual edits from disk if the file changed externally.
+      mergedWaUserMappings.set(String(jid), normalizedName);
+    }
+
+    waUserDisplayMap.clear();
+    for (const [jid, displayName] of mergedWaUserMappings.entries()) {
+      waUserDisplayMap.set(jid, displayName);
+    }
+
+    const topics = Object.fromEntries(
+      [...topicCatalog.entries()].map(([key, entry]) => [key, { id: entry.id, name: entry.name || null }])
+    );
+
+    const data = {
+      topics,
+      waGroups: lastWhatsAppGroups.map((g) => ({ name: g.name, id: g.id._serialized })),
+      waUserMappings: Object.fromEntries(waUserDisplayMap),
+      messageLinks: {
+        waToTg: Object.fromEntries(waToTgMessageLinks),
+        tgToWa: Object.fromEntries(tgToWaMessageLinks)
+      }
+    };
+
+    const serialized = JSON.stringify(data);
+    fs.writeFileSync(BRIDGE_STATE_PATH, serialized, "utf8");
+    loadedStateSignature = computeStateSignature(serialized);
+  } catch (error) {
+    log("warn", `Failed to save state to ${BRIDGE_STATE_PATH}`, error.message);
+  }
+}
+
+function isWaNoneMapping(value) {
+  return normalizeString(value).toLowerCase() === WA_USER_MAPPING_NONE;
+}
+
+function resolveWhatsAppSenderName(msg, contact) {
+  if (msg.fromMe) {
+    return contact.pushname || contact.name || "Me";
+  }
+
+  if (contact.pushname || contact.name) {
+    return contact.pushname || contact.name;
+  }
+
+  const authorJid = msg.author ? String(msg.author) : "";
+  if (!authorJid) return "Unknown";
+
+  const mappedName = waUserDisplayMap.get(authorJid);
+  const normalizedMappedName = normalizeString(mappedName);
+  if (normalizedMappedName) {
+    return isWaNoneMapping(normalizedMappedName) ? authorJid : normalizedMappedName;
+  }
+
+  waUserDisplayMap.set(authorJid, WA_USER_MAPPING_NONE);
+  saveState();
+  log("info", `Unknown WhatsApp JID tracked in state file: ${authorJid}`);
+  return authorJid;
+}
 
 Object.entries(cfg.waGroupToTopic).forEach(([waId, topicId]) => {
   topicCatalog.set(String(topicId), {
@@ -97,6 +254,7 @@ function upsertTelegramTopic(topicId, name, source) {
       name: name || null,
       source: source || null
     });
+    saveState();
     writeSnapshotFile(lastWhatsAppGroups);
     return;
   }
@@ -115,6 +273,7 @@ function upsertTelegramTopic(topicId, name, source) {
 
   if (changed) {
     topicCatalog.set(key, existing);
+    saveState();
     writeSnapshotFile(lastWhatsAppGroups);
   }
 }
@@ -125,7 +284,7 @@ function rememberBridgeOutboundMessage(waGroupId, text) {
 
   queue.push({
     text: text || "",
-    expiresAt: Date.now() + 2 * 60 * 1000
+    expiresAt: Date.now() + RECENT_OUTBOUND_TTL_MS
   });
 
   recentBridgeOutboundMessages.set(key, queue);
@@ -159,34 +318,245 @@ function isRecentBridgeOutboundMessage(waGroupId, text) {
   return true;
 }
 
-function buildWaMessageKey(msg) {
-  if (msg.id?._serialized) return msg.id._serialized;
+function buildWaMessageKey(waGroupId, waMessageId) {
+  return `${String(waGroupId)}:${String(waMessageId)}`;
+}
 
-  const parts = [
-    msg.from || "",
-    msg.to || "",
-    msg.author || "",
-    String(msg.timestamp || ""),
-    msg.body || msg.caption || ""
-  ];
+function extractWaStableMessageId(waMessageIdOrObject) {
+  if (!waMessageIdOrObject) return null;
 
-  return parts.join("|");
+  if (typeof waMessageIdOrObject === "object") {
+    if (waMessageIdOrObject.id) return String(waMessageIdOrObject.id);
+    if (waMessageIdOrObject._serialized) return extractWaStableMessageId(waMessageIdOrObject._serialized);
+    return null;
+  }
+
+  const serialized = String(waMessageIdOrObject);
+  const parts = serialized.split("_");
+
+  if (parts.length >= 3 && (parts[0] === "true" || parts[0] === "false")) {
+    return parts[2] || null;
+  }
+
+  return null;
+}
+
+function buildTgMessageKey(tgMessageId) {
+  return `${String(cfg.tgGroupId)}:${String(tgMessageId)}`;
+}
+
+function pruneExpiredMessageLinks() {
+  const now = Date.now();
+
+  for (const [key, value] of waToTgMessageLinks.entries()) {
+    if (value.expiresAt <= now) waToTgMessageLinks.delete(key);
+  }
+
+  for (const [key, value] of tgToWaMessageLinks.entries()) {
+    if (value.expiresAt <= now) tgToWaMessageLinks.delete(key);
+  }
+}
+
+function pruneRecentProcessedWaMessages() {
+  const now = Date.now();
+
+  for (const [key, expiresAt] of recentProcessedWaMessages.entries()) {
+    if (expiresAt <= now) recentProcessedWaMessages.delete(key);
+  }
 }
 
 function shouldProcessWaMessage(msg) {
-  const key = buildWaMessageKey(msg);
-  const now = Date.now();
+  const msgId = msg?.id?._serialized;
+  if (!msgId) return true;
 
-  for (const [storedKey, expiresAt] of recentProcessedWaMessages.entries()) {
-    if (expiresAt <= now) recentProcessedWaMessages.delete(storedKey);
-  }
+  pruneRecentProcessedWaMessages();
 
-  if (recentProcessedWaMessages.has(key)) {
+  if (recentProcessedWaMessages.has(msgId)) {
     return false;
   }
 
-  recentProcessedWaMessages.set(key, now + 2 * 60 * 1000);
+  recentProcessedWaMessages.set(msgId, Date.now() + PROCESSED_WA_MESSAGE_TTL_MS);
   return true;
+}
+
+function isDetachedFrameError(error) {
+  return String(error?.message || "").includes("detached Frame");
+}
+
+function scheduleWhatsAppReconnect(reason) {
+  if (waReconnectTimer || waReconnectInProgress) {
+    log("warn", `WhatsApp reconnect already scheduled/in progress (${reason})`);
+    return;
+  }
+
+  waReconnectTimer = setTimeout(async () => {
+    waReconnectTimer = null;
+    waReconnectInProgress = true;
+    let retryDelayMs = 0;
+
+    try {
+      log("warn", `Reinitializing WhatsApp client (${reason})`);
+      await wa.destroy().catch(() => undefined);
+      await wa.initialize();
+    } catch (error) {
+      log("error", "WhatsApp reinitialization failed", error.message);
+        retryDelayMs = WA_RECONNECT_RETRY_DELAY_MS;
+    } finally {
+      waReconnectInProgress = false;
+    }
+
+    if (retryDelayMs > 0) {
+      waReconnectTimer = setTimeout(() => {
+        waReconnectTimer = null;
+        scheduleWhatsAppReconnect("retry_after_failed_reinit");
+      }, retryDelayMs);
+      waReconnectTimer.unref?.();
+    }
+  }, WA_RECONNECT_DELAY_MS);
+
+  waReconnectTimer.unref?.();
+}
+
+function rememberMessageLink(waGroupId, waMessageId, topicId, tgMessageId, waStableMessageId) {
+  if (!waMessageId || !tgMessageId) return;
+
+  pruneExpiredMessageLinks();
+
+  const expiresAt = Date.now() + MESSAGE_LINK_TTL_MS;
+  const waKey = buildWaMessageKey(waGroupId, waMessageId);
+  const tgKey = buildTgMessageKey(tgMessageId);
+  const stableId = waStableMessageId || extractWaStableMessageId(waMessageId);
+
+  waToTgMessageLinks.set(waKey, {
+    topicId: String(topicId),
+    tgMessageId,
+    expiresAt
+  });
+
+  if (stableId) {
+    waToTgMessageLinks.set(buildWaMessageKey(waGroupId, `id:${stableId}`), {
+      topicId: String(topicId),
+      tgMessageId,
+      expiresAt
+    });
+  }
+
+  tgToWaMessageLinks.set(tgKey, {
+    waGroupId: String(waGroupId),
+    waMessageId,
+    expiresAt
+  });
+
+  saveState();
+}
+
+async function resolveTelegramReplyMessageId(msg) {
+  if (!msg.hasQuotedMsg) return null;
+
+  try {
+    const quoted = await msg.getQuotedMessage();
+    const quotedWaMessageId = quoted?.id?._serialized;
+    if (!quotedWaMessageId) return null;
+
+    pruneExpiredMessageLinks();
+
+    const quotedStableId = extractWaStableMessageId(quoted);
+    const link = waToTgMessageLinks.get(buildWaMessageKey(msg.from, quotedWaMessageId))
+      || (quotedStableId ? waToTgMessageLinks.get(buildWaMessageKey(msg.from, `id:${quotedStableId}`)) : null);
+    return link?.tgMessageId || null;
+  } catch (error) {
+    log("debug", "Failed to resolve Telegram reply target from WhatsApp message", error.message);
+    return null;
+  }
+}
+
+function resolveWhatsAppQuotedMessageId(tgMsg, waGroupId) {
+  const replied = tgMsg.reply_to_message;
+  if (!replied?.message_id) return null;
+
+  pruneExpiredMessageLinks();
+
+  const link = tgToWaMessageLinks.get(buildTgMessageKey(replied.message_id));
+  if (!link) return null;
+  if (String(link.waGroupId) !== String(waGroupId)) return null;
+
+  return link.waMessageId;
+}
+
+function extractWaGroupIdFromSerializedMessageId(serializedId) {
+  if (!serializedId) return null;
+  const parts = String(serializedId).split("_");
+  if (parts.length < 2) return null;
+  const maybeGroupId = parts[1];
+  return maybeGroupId.endsWith("@g.us") ? maybeGroupId : null;
+}
+
+function extractWaMessageInfoFromReaction(reaction) {
+  const parentMsgId = reaction?.msgId;
+  if (!parentMsgId) return { waGroupId: null, waMessageId: null };
+
+  const waMessageId = parentMsgId._serialized || null;
+  const waGroupId = parentMsgId.remote?._serialized
+    || parentMsgId.remote
+    || extractWaGroupIdFromSerializedMessageId(waMessageId);
+
+  return {
+    waGroupId: waGroupId ? String(waGroupId) : null,
+    waMessageId: waMessageId ? String(waMessageId) : null
+  };
+}
+
+function extractTelegramEmojiReaction(reactions) {
+  const emojiReaction = (reactions || []).find((entry) => entry?.type === "emoji" && entry?.emoji);
+  return emojiReaction?.emoji || "";
+}
+
+async function relayWhatsAppReactionToTelegram(reaction) {
+  try {
+    const { waGroupId, waMessageId } = extractWaMessageInfoFromReaction(reaction);
+    if (!waGroupId || !waMessageId) return;
+    if (!waGroupId.endsWith("@g.us")) return;
+
+    const topicId = cfg.waGroupToTopic[waGroupId];
+    if (!topicId) return;
+
+    pruneExpiredMessageLinks();
+    const stableId = extractWaStableMessageId(reaction?.msgId);
+    const link = waToTgMessageLinks.get(buildWaMessageKey(waGroupId, waMessageId))
+      || (stableId ? waToTgMessageLinks.get(buildWaMessageKey(waGroupId, `id:${stableId}`)) : null);
+    if (!link?.tgMessageId) return;
+
+    const emoji = reaction?.reaction || "";
+    const tgReaction = emoji ? [{ type: "emoji", emoji }] : [];
+
+    await tg.telegram.setMessageReaction(cfg.tgGroupId, link.tgMessageId, tgReaction);
+  } catch (error) {
+    log("warn", "Failed to relay reaction from WhatsApp to Telegram", error.message);
+  }
+}
+
+async function relayTelegramReactionToWhatsApp(ctx) {
+  const reactionUpdate = ctx.update?.message_reaction;
+  if (!reactionUpdate) return;
+  if (String(reactionUpdate.chat?.id) !== String(cfg.tgGroupId)) return;
+  if (reactionUpdate.user?.is_bot) return;
+
+  pruneExpiredMessageLinks();
+
+  const link = tgToWaMessageLinks.get(buildTgMessageKey(reactionUpdate.message_id));
+  if (!link?.waMessageId) {
+    log("debug", `No WA mapping found for Telegram reaction target message ${reactionUpdate.message_id}`);
+    return;
+  }
+
+  const emoji = extractTelegramEmojiReaction(reactionUpdate.new_reaction);
+
+  try {
+    await wa.sendReaction(link.waMessageId, emoji);
+    log("debug", `Reaction relayed Telegram -> WhatsApp for message ${reactionUpdate.message_id}`);
+  } catch (error) {
+    log("warn", "Failed to relay reaction from Telegram to WhatsApp", error.message);
+  }
 }
 
 async function relayWhatsAppMessageToTelegram(msg) {
@@ -203,19 +573,29 @@ async function relayWhatsAppMessageToTelegram(msg) {
   }
 
   try {
+    const replyToMessageId = await resolveTelegramReplyMessageId(msg);
     const contact = await msg.getContact();
-    const sender = msg.fromMe
-      ? (contact.pushname || contact.name || "Me")
-      : (contact.pushname || contact.name || msg.author || "Unknown");
+    const sender = resolveWhatsAppSenderName(msg, contact);
     const safeSender = escapeMarkdownV2(sender.replace("@c.us", ""));
     const safeBody = escapeMarkdownV2(rawText);
     const prefix = `*${safeSender}*`;
+    let sentTelegramMessage = null;
 
     if (msg.hasMedia) {
       const media = await msg.downloadMedia();
-      await sendMediaToTelegram(topicId, media, safeBody ? `${prefix}\n${safeBody}` : prefix);
+      sentTelegramMessage = await sendMediaToTelegram(topicId, media, prefix, replyToMessageId);
+
+      // Captions from some WhatsApp media types can be flaky on Telegram.
+      // Send text as a separate message replying to the media to keep content visible.
+      if (safeBody && sentTelegramMessage?.message_id) {
+        await sendToTelegramTopic(topicId, `${prefix}\n${safeBody}`, sentTelegramMessage.message_id);
+      }
     } else if (rawText) {
-      await sendToTelegramTopic(topicId, `${prefix}\n${safeBody}`);
+      sentTelegramMessage = await sendToTelegramTopic(topicId, `${prefix}\n${safeBody}`, replyToMessageId);
+    }
+
+    if (sentTelegramMessage?.message_id && msg.id?._serialized) {
+      rememberMessageLink(msg.from, msg.id._serialized, topicId, sentTelegramMessage.message_id, msg.id?.id);
     }
   } catch (error) {
     log("error", "Failed to relay message from WhatsApp to Telegram", error.message);
@@ -233,17 +613,19 @@ async function refreshWhatsAppGroupsSnapshot() {
   });
 
   writeSnapshotFile(groups);
+  saveState();
   log("info", `WhatsApp groups list updated in ${cfg.waGroupsListPath}`);
 }
 
-async function sendToTelegramTopic(topicId, text) {
+async function sendToTelegramTopic(topicId, text, replyToMessageId) {
   return tg.telegram.sendMessage(cfg.tgGroupId, text, {
     message_thread_id: topicId,
+    reply_to_message_id: replyToMessageId || undefined,
     parse_mode: "MarkdownV2"
   });
 }
 
-async function sendMediaToTelegram(topicId, media, caption) {
+async function sendMediaToTelegram(topicId, media, caption, replyToMessageId) {
   const ext = media.mimetype.split("/")[1]?.split(";")[0] || "bin";
   const filePath = path.join(os.tmpdir(), `wa-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
 
@@ -251,24 +633,39 @@ async function sendMediaToTelegram(topicId, media, caption) {
 
   const opts = {
     message_thread_id: topicId,
+    reply_to_message_id: replyToMessageId || undefined,
     caption,
     parse_mode: "MarkdownV2"
   };
 
   try {
     if (media.mimetype.startsWith("image/")) {
-      await tg.telegram.sendPhoto(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await tg.telegram.sendPhoto(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     } else if (media.mimetype.startsWith("video/")) {
-      await tg.telegram.sendVideo(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await tg.telegram.sendVideo(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     } else if (media.mimetype.startsWith("audio/") || media.mimetype === "application/ogg") {
-      await tg.telegram.sendVoice(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await tg.telegram.sendVoice(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     } else {
-      await tg.telegram.sendDocument(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await tg.telegram.sendDocument(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
     }
   } finally {
     fs.rmSync(filePath, { force: true });
   }
 }
+
+async function sendWhatsAppReadReceiptIfEnabled(waGroupId, tgMsg) {
+  if (!cfg.tgToWaSendReadReceiptOnActivity) return;
+  if (tgMsg.from?.is_bot) return;
+
+  try {
+    await wa.sendSeen(waGroupId);
+    log("debug", `Read receipt sent to WhatsApp group ${waGroupId}`);
+  } catch (error) {
+    log("warn", `Failed to send read receipt to WhatsApp group ${waGroupId}`, error.message);
+  }
+}
+
+loadState();
 
 wa.on("qr", (qr) => {
   qrcode.generate(qr, { small: true });
@@ -277,7 +674,15 @@ wa.on("qr", (qr) => {
 
 wa.on("ready", async () => {
   log("info", "WhatsApp client is ready.");
-  await refreshWhatsAppGroupsSnapshot();
+  try {
+    await refreshWhatsAppGroupsSnapshot();
+  } catch (error) {
+    if (isDetachedFrameError(error)) {
+      log("warn", "WhatsApp groups snapshot skipped because browser frame was reloaded");
+    } else {
+      throw error;
+    }
+  }
 
   if (cfg.waGroupsListRefreshMinutes > 0) {
     const refreshMs = cfg.waGroupsListRefreshMinutes * 60 * 1000;
@@ -285,6 +690,10 @@ wa.on("ready", async () => {
       try {
         await refreshWhatsAppGroupsSnapshot();
       } catch (error) {
+        if (isDetachedFrameError(error)) {
+          log("warn", "WhatsApp groups refresh skipped: browser frame was reloaded");
+          return;
+        }
         log("error", "Failed to refresh WhatsApp groups list", error.message);
       }
     }, refreshMs).unref();
@@ -298,8 +707,23 @@ wa.on("ready", async () => {
   );
 });
 
-wa.on("message", relayWhatsAppMessageToTelegram);
 wa.on("message_create", relayWhatsAppMessageToTelegram);
+wa.on("message", relayWhatsAppMessageToTelegram);
+wa.on("message_reaction", relayWhatsAppReactionToTelegram);
+wa.on("disconnected", (reason) => {
+  log("warn", "WhatsApp disconnected", reason);
+  scheduleWhatsAppReconnect(`disconnected: ${reason || "unknown"}`);
+});
+wa.on("auth_failure", (message) => {
+  log("error", "WhatsApp auth failure", message);
+  scheduleWhatsAppReconnect("auth_failure");
+});
+wa.on("change_state", (state) => {
+  log("info", `WhatsApp state changed to ${state}`);
+  if (["UNPAIRED", "UNPAIRED_IDLE", "CONFLICT", "TIMEOUT"].includes(String(state))) {
+    scheduleWhatsAppReconnect(`state: ${state}`);
+  }
+});
 
 tg.on("message", async (ctx) => {
   const tgMsg = ctx.message;
@@ -314,6 +738,8 @@ tg.on("message", async (ctx) => {
   const waGroupId = topicToWa[String(topicId)];
   if (!waGroupId) return;
 
+  await sendWhatsAppReadReceiptIfEnabled(waGroupId, tgMsg);
+
   const text = tgMsg.text || tgMsg.caption || "";
   const profileName = [tgMsg.from?.first_name, tgMsg.from?.last_name].filter(Boolean).join(" ").trim();
   const fromName = profileName || (tgMsg.from?.username ? `@${tgMsg.from.username}` : "Telegram");
@@ -321,34 +747,55 @@ tg.on("message", async (ctx) => {
   const bridgedText = cfg.tgToWaIncludePrefix
     ? `${cfg.tgToWaPrefix}${senderText ? ` ${senderText}` : ""}`
     : senderText;
+  const quotedMessageId = resolveWhatsAppQuotedMessageId(tgMsg, waGroupId);
 
   try {
+    let sentWhatsAppMessage = null;
+
     if (tgMsg.photo) {
       const fileId = tgMsg.photo[tgMsg.photo.length - 1].file_id;
       const fileUrl = await tg.telegram.getFileLink(fileId);
       const media = await MessageMedia.fromUrl(fileUrl.toString());
       rememberBridgeOutboundMessage(waGroupId, bridgedText);
-      await wa.sendMessage(waGroupId, media, { caption: bridgedText });
+      sentWhatsAppMessage = await wa.sendMessage(waGroupId, media, {
+        caption: bridgedText,
+        quotedMessageId: quotedMessageId || undefined
+      });
     } else if (tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice) {
       const file = tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice;
       const fileUrl = await tg.telegram.getFileLink(file.file_id);
       const media = await MessageMedia.fromUrl(fileUrl.toString());
       rememberBridgeOutboundMessage(waGroupId, bridgedText);
-      await wa.sendMessage(waGroupId, media, { caption: bridgedText });
+      sentWhatsAppMessage = await wa.sendMessage(waGroupId, media, {
+        caption: bridgedText,
+        quotedMessageId: quotedMessageId || undefined
+      });
     } else if (text) {
       rememberBridgeOutboundMessage(waGroupId, bridgedText);
-      await wa.sendMessage(waGroupId, bridgedText);
+      sentWhatsAppMessage = await wa.sendMessage(
+        waGroupId,
+        bridgedText,
+        quotedMessageId ? { quotedMessageId } : undefined
+      );
+    }
+
+    if (sentWhatsAppMessage?.id?._serialized && tgMsg.message_id) {
+      rememberMessageLink(waGroupId, sentWhatsAppMessage.id._serialized, topicId, tgMsg.message_id, sentWhatsAppMessage.id?.id);
     }
   } catch (error) {
     log("error", "Failed to relay message from Telegram to WhatsApp", error.message);
   }
 });
 
+tg.on("message_reaction", relayTelegramReactionToWhatsApp);
+
 tg.catch((error) => {
   log("error", "Telegram handler error", error.message);
 });
 
-tg.launch().catch((error) => {
+tg.launch({
+  allowedUpdates: ["message", "message_reaction"]
+}).catch((error) => {
   log("error", "Telegram initialization failed", error.message);
   process.exitCode = 1;
 });
@@ -363,5 +810,5 @@ process.once("SIGTERM", () => {
 
 wa.initialize().catch((error) => {
   log("error", "WhatsApp initialization failed", error.message);
-  process.exitCode = 1;
+  scheduleWhatsAppReconnect("initialization_failure");
 });
