@@ -18,6 +18,7 @@ const recentBridgeOutboundMessages = new Map();
 const waToTgMessageLinks = new Map();
 const tgToWaMessageLinks = new Map();
 const recentProcessedWaMessages = new Map();
+const waUserDisplayMap = new Map();
 const MESSAGE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PROCESSED_WA_MESSAGE_TTL_MS = 5 * 60 * 1000;
 const BRIDGE_STATE_PATH = process.env.BRIDGE_STATE_PATH || "./bridge-state.json";
@@ -53,7 +54,14 @@ function loadState() {
       }
     }
 
-    log("info", `State loaded from ${BRIDGE_STATE_PATH} (${waToTgMessageLinks.size} message links, ${topicsLoaded} topics)`);
+    let waUserMappingsLoaded = 0;
+    for (const [jid, displayName] of Object.entries(raw.waUserMappings || {})) {
+      if (!jid || typeof displayName !== "string" || !displayName.trim()) continue;
+      waUserDisplayMap.set(String(jid), displayName.trim());
+      waUserMappingsLoaded++;
+    }
+
+    log("info", `State loaded from ${BRIDGE_STATE_PATH} (${waToTgMessageLinks.size} message links, ${topicsLoaded} topics, ${waUserMappingsLoaded} user mappings)`);
   } catch (error) {
     log("warn", `Failed to load state from ${BRIDGE_STATE_PATH}`, error.message);
   }
@@ -68,6 +76,7 @@ function saveState() {
     const data = {
       topics,
       waGroups: lastWhatsAppGroups.map((g) => ({ name: g.name, id: g.id._serialized })),
+      waUserMappings: Object.fromEntries(waUserDisplayMap),
       messageLinks: {
         waToTg: Object.fromEntries(waToTgMessageLinks),
         tgToWa: Object.fromEntries(tgToWaMessageLinks)
@@ -77,6 +86,19 @@ function saveState() {
   } catch (error) {
     log("warn", `Failed to save state to ${BRIDGE_STATE_PATH}`, error.message);
   }
+}
+
+function resolveWhatsAppSenderName(msg, contact) {
+  if (msg.fromMe) {
+    return contact.pushname || contact.name || "Me";
+  }
+
+  if (contact.pushname || contact.name) {
+    return contact.pushname || contact.name;
+  }
+
+  const authorJid = msg.author ? String(msg.author) : "";
+  return waUserDisplayMap.get(authorJid) || authorJid || "Unknown";
 }
 
 Object.entries(cfg.waGroupToTopic).forEach(([waId, topicId]) => {
@@ -479,9 +501,7 @@ async function relayWhatsAppMessageToTelegram(msg) {
   try {
     const replyToMessageId = await resolveTelegramReplyMessageId(msg);
     const contact = await msg.getContact();
-    const sender = msg.fromMe
-      ? (contact.pushname || contact.name || "Me")
-      : (contact.pushname || contact.name || msg.author || "Unknown");
+    const sender = resolveWhatsAppSenderName(msg, contact);
     const safeSender = escapeMarkdownV2(sender.replace("@c.us", ""));
     const safeBody = escapeMarkdownV2(rawText);
     const prefix = `*${safeSender}*`;

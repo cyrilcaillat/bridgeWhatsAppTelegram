@@ -134,6 +134,25 @@ WA_GROUP_IDS=120363123456789012@g.us:101,120363987654321098@g.us:102
 
 Le fichier `WA_GROUPS_LIST_PATH` contient aussi une section `Telegram topics` avec les IDs detectes. Pour enrichir cette section, envoyer au moins un message dans chaque topic Telegram.
 
+## Etape 4b - Mapping JID WhatsApp -> nom d'affichage (optionnel)
+
+Quand WhatsApp ne retourne pas de nom de contact dans un groupe, le bridge peut utiliser un fichier JSON de mapping.
+
+Le mapping est stocke dans le meme fichier d'etat que les groupes/messages: `BRIDGE_STATE_PATH` (defaut `./bridge-state.json`), dans la section `waUserMappings`.
+
+Exemple:
+
+```json
+{
+  "waUserMappings": {
+  "33612345678@c.us": "Alice",
+  "33698765432@c.us": "Bob"
+  }
+}
+```
+
+Si un JID n'est pas mappe, le bridge garde le JID brut.
+
 ## Etape 5 - Dependances systeme pour Chromium (Debian/Ubuntu)
 
 Puppeteer/whatsapp-web.js necessite des librairies systeme. Les installer une fois avant le premier lancement:
