@@ -5,13 +5,6 @@ function parseBool(value, defaultValue) {
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
 }
 
-function parseNonNegativeInt(value, defaultValue) {
-  if (value == null || value === "") return defaultValue;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) return defaultValue;
-  return parsed;
-}
-
 function parseGroupMap(raw) {
   if (!raw || !raw.trim()) return {};
 
@@ -45,8 +38,6 @@ function loadConfig() {
     tgToken: process.env.TG_TOKEN,
     tgGroupId: process.env.TG_GROUP_ID,
     waGroupToTopic: parseGroupMap(process.env.WA_GROUP_IDS || ""),
-    waGroupsListPath: process.env.WA_GROUPS_LIST_PATH || "./whatsapp-groups.txt",
-    waGroupsListRefreshMinutes: parseNonNegativeInt(process.env.WA_GROUPS_LIST_REFRESH_MINUTES, 60),
     tgToWaIncludePrefix: parseBool(process.env.TG_TO_WA_INCLUDE_PREFIX, false),
     tgToWaSendReadReceiptOnActivity: parseBool(process.env.TG_TO_WA_SEND_READ_RECEIPT_ON_ACTIVITY, false),
     tgToWaPrefix: process.env.TG_TO_WA_PREFIX || "[Bridge Telegram]",

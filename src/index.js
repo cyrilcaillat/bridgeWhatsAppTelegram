@@ -212,32 +212,6 @@ function getWhatsAppGroups(chats) {
   return chats.filter((chat) => chat.isGroup);
 }
 
-function writeSnapshotFile(groups) {
-  const sortedGroups = [...groups].sort((a, b) => a.name.localeCompare(b.name));
-  const sortedTopics = [...topicCatalog.values()].sort((a, b) => Number(a.id) - Number(b.id));
-  const lines = [
-    `Updated: ${new Date().toISOString()}`,
-    "",
-    "WhatsApp groups:",
-    ...sortedGroups.map((group) => `${group.name} => ${group.id._serialized}`)
-  ];
-
-  lines.push("", "Telegram topics:");
-
-  if (sortedTopics.length === 0) {
-    lines.push("(none detected yet)");
-  } else {
-    sortedTopics.forEach((topic) => {
-      const label = topic.name || "(name unknown yet)";
-      const source = topic.source ? ` [${topic.source}]` : "";
-      lines.push(`${label} => ${topic.id}${source}`);
-    });
-  }
-
-  fs.mkdirSync(path.dirname(cfg.waGroupsListPath), { recursive: true });
-  fs.writeFileSync(cfg.waGroupsListPath, `${lines.join("\n")}\n`, "utf8");
-}
-
 function extractTelegramTopicName(msg) {
   return msg.forum_topic_created?.name
     || msg.reply_to_message?.forum_topic_created?.name
@@ -255,7 +229,6 @@ function upsertTelegramTopic(topicId, name, source) {
       source: source || null
     });
     saveState();
-    writeSnapshotFile(lastWhatsAppGroups);
     return;
   }
 
@@ -274,7 +247,6 @@ function upsertTelegramTopic(topicId, name, source) {
   if (changed) {
     topicCatalog.set(key, existing);
     saveState();
-    writeSnapshotFile(lastWhatsAppGroups);
   }
 }
 
@@ -623,9 +595,8 @@ async function refreshWhatsAppGroupsSnapshot() {
     log("info", `${group.name} => ${group.id._serialized}`);
   });
 
-  writeSnapshotFile(groups);
   saveState();
-  log("info", `WhatsApp groups list updated in ${cfg.waGroupsListPath}`);
+  log("info", "WhatsApp groups state updated in bridge-state.json");
 }
 
 async function sendToTelegramTopic(topicId, text, replyToMessageId) {
@@ -693,23 +664,6 @@ wa.on("ready", async () => {
     } else {
       throw error;
     }
-  }
-
-  if (cfg.waGroupsListRefreshMinutes > 0) {
-    const refreshMs = cfg.waGroupsListRefreshMinutes * 60 * 1000;
-    setInterval(async () => {
-      try {
-        await refreshWhatsAppGroupsSnapshot();
-      } catch (error) {
-        if (isDetachedFrameError(error)) {
-          log("warn", "WhatsApp groups refresh skipped: browser frame was reloaded");
-          return;
-        }
-        log("error", "Failed to refresh WhatsApp groups list", error.message);
-      }
-    }, refreshMs).unref();
-
-    log("info", `WhatsApp groups list refresh enabled every ${cfg.waGroupsListRefreshMinutes} minute(s).`);
   }
 
   await tg.telegram.sendMessage(

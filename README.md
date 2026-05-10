@@ -116,8 +116,6 @@ LOG_LEVEL=info
 - `WA_GROUP_IDS` (optionnel mais recommande): correspondances groupe WhatsApp -> topic Telegram
   - Format: `WA_GROUP_ID:TG_TOPIC_ID`
   - Entrees separees par des virgules
-- `WA_GROUPS_LIST_PATH` (optionnel, defaut `./whatsapp-groups.txt`): chemin du fichier texte maintenu avec la liste des groupes WhatsApp et des topics Telegram detectes
-- `WA_GROUPS_LIST_REFRESH_MINUTES` (optionnel, defaut `60`): frequence de mise a jour du fichier. `0` desactive la mise a jour periodique (mise a jour au demarrage uniquement)
 - `TG_TO_WA_INCLUDE_PREFIX` (optionnel, defaut `false`): ajoute un prefixe visuel sur les messages Telegram envoyes vers WhatsApp
 - `TG_TO_WA_PREFIX` (optionnel, defaut `[Bridge Telegram]`): texte de prefixe utilise quand `TG_TO_WA_INCLUDE_PREFIX=true`
 - `TG_TO_WA_INCLUDE_USERNAME` (optionnel, defaut `true`): inclut le nom/profil Telegram dans le message WhatsApp relaye
@@ -142,7 +140,7 @@ Construire `WA_GROUP_IDS` avec les topics Telegram:
 WA_GROUP_IDS=120363123456789012@g.us:101,120363987654321098@g.us:102
 ```
 
-Le fichier `WA_GROUPS_LIST_PATH` contient aussi une section `Telegram topics` avec les IDs detectes. Pour enrichir cette section, envoyer au moins un message dans chaque topic Telegram.
+La liste des groupes WhatsApp detectes et des topics Telegram est conservee dans `bridge-state.json`.
 
 ## Mapping JID WhatsApp -> nom d'affichage
 
