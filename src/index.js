@@ -17,9 +17,13 @@ const topicCatalog = new Map();
 const recentBridgeOutboundMessages = new Map();
 const waToTgMessageLinks = new Map();
 const tgToWaMessageLinks = new Map();
+const recentProcessedWaMessages = new Map();
 const MESSAGE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const PROCESSED_WA_MESSAGE_TTL_MS = 5 * 60 * 1000;
 const BRIDGE_STATE_PATH = process.env.BRIDGE_STATE_PATH || "./bridge-state.json";
 let lastWhatsAppGroups = [];
+let waReconnectTimer = null;
+let waReconnectInProgress = false;
 
 function loadState() {
   try {
@@ -257,6 +261,66 @@ function pruneExpiredMessageLinks() {
   }
 }
 
+function pruneRecentProcessedWaMessages() {
+  const now = Date.now();
+
+  for (const [key, expiresAt] of recentProcessedWaMessages.entries()) {
+    if (expiresAt <= now) recentProcessedWaMessages.delete(key);
+  }
+}
+
+function shouldProcessWaMessage(msg) {
+  const msgId = msg?.id?._serialized;
+  if (!msgId) return true;
+
+  pruneRecentProcessedWaMessages();
+
+  if (recentProcessedWaMessages.has(msgId)) {
+    return false;
+  }
+
+  recentProcessedWaMessages.set(msgId, Date.now() + PROCESSED_WA_MESSAGE_TTL_MS);
+  return true;
+}
+
+function isDetachedFrameError(error) {
+  return String(error?.message || "").includes("detached Frame");
+}
+
+function scheduleWhatsAppReconnect(reason) {
+  if (waReconnectTimer || waReconnectInProgress) {
+    log("warn", `WhatsApp reconnect already scheduled/in progress (${reason})`);
+    return;
+  }
+
+  waReconnectTimer = setTimeout(async () => {
+    waReconnectTimer = null;
+    waReconnectInProgress = true;
+    let retryDelayMs = 0;
+
+    try {
+      log("warn", `Reinitializing WhatsApp client (${reason})`);
+      await wa.destroy().catch(() => undefined);
+      await wa.initialize();
+    } catch (error) {
+      log("error", "WhatsApp reinitialization failed", error.message);
+      retryDelayMs = 15000;
+    } finally {
+      waReconnectInProgress = false;
+    }
+
+    if (retryDelayMs > 0) {
+      waReconnectTimer = setTimeout(() => {
+        waReconnectTimer = null;
+        scheduleWhatsAppReconnect("retry_after_failed_reinit");
+      }, retryDelayMs);
+      waReconnectTimer.unref?.();
+    }
+  }, 5000);
+
+  waReconnectTimer.unref?.();
+}
+
 function rememberMessageLink(waGroupId, waMessageId, topicId, tgMessageId, waStableMessageId) {
   if (!waMessageId || !tgMessageId) return;
 
@@ -400,6 +464,7 @@ async function relayTelegramReactionToWhatsApp(ctx) {
 }
 
 async function relayWhatsAppMessageToTelegram(msg) {
+  if (!shouldProcessWaMessage(msg)) return;
   if (!msg.from.endsWith("@g.us")) return;
 
   const topicId = cfg.waGroupToTopic[msg.from];
@@ -509,7 +574,15 @@ wa.on("qr", (qr) => {
 
 wa.on("ready", async () => {
   log("info", "WhatsApp client is ready.");
-  await refreshWhatsAppGroupsSnapshot();
+  try {
+    await refreshWhatsAppGroupsSnapshot();
+  } catch (error) {
+    if (isDetachedFrameError(error)) {
+      log("warn", "WhatsApp groups snapshot skipped because browser frame was reloaded");
+    } else {
+      throw error;
+    }
+  }
 
   if (cfg.waGroupsListRefreshMinutes > 0) {
     const refreshMs = cfg.waGroupsListRefreshMinutes * 60 * 1000;
@@ -517,6 +590,10 @@ wa.on("ready", async () => {
       try {
         await refreshWhatsAppGroupsSnapshot();
       } catch (error) {
+        if (isDetachedFrameError(error)) {
+          log("warn", "WhatsApp groups refresh skipped: browser frame was reloaded");
+          return;
+        }
         log("error", "Failed to refresh WhatsApp groups list", error.message);
       }
     }, refreshMs).unref();
@@ -531,7 +608,22 @@ wa.on("ready", async () => {
 });
 
 wa.on("message_create", relayWhatsAppMessageToTelegram);
+wa.on("message", relayWhatsAppMessageToTelegram);
 wa.on("message_reaction", relayWhatsAppReactionToTelegram);
+wa.on("disconnected", (reason) => {
+  log("warn", "WhatsApp disconnected", reason);
+  scheduleWhatsAppReconnect(`disconnected: ${reason || "unknown"}`);
+});
+wa.on("auth_failure", (message) => {
+  log("error", "WhatsApp auth failure", message);
+  scheduleWhatsAppReconnect("auth_failure");
+});
+wa.on("change_state", (state) => {
+  log("info", `WhatsApp state changed to ${state}`);
+  if (["UNPAIRED", "UNPAIRED_IDLE", "CONFLICT", "TIMEOUT"].includes(String(state))) {
+    scheduleWhatsAppReconnect(`state: ${state}`);
+  }
+});
 
 tg.on("message", async (ctx) => {
   const tgMsg = ctx.message;
@@ -618,5 +710,5 @@ process.once("SIGTERM", () => {
 
 wa.initialize().catch((error) => {
   log("error", "WhatsApp initialization failed", error.message);
-  process.exitCode = 1;
+  scheduleWhatsAppReconnect("initialization_failure");
 });
