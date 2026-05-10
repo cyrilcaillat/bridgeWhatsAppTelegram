@@ -583,7 +583,13 @@ async function relayWhatsAppMessageToTelegram(msg) {
 
     if (msg.hasMedia) {
       const media = await msg.downloadMedia();
-      sentTelegramMessage = await sendMediaToTelegram(topicId, media, safeBody ? `${prefix}\n${safeBody}` : prefix, replyToMessageId);
+      sentTelegramMessage = await sendMediaToTelegram(topicId, media, prefix, replyToMessageId);
+
+      // Captions from some WhatsApp media types can be flaky on Telegram.
+      // Send text as a separate message replying to the media to keep content visible.
+      if (safeBody && sentTelegramMessage?.message_id) {
+        await sendToTelegramTopic(topicId, `${prefix}\n${safeBody}`, sentTelegramMessage.message_id);
+      }
     } else if (rawText) {
       sentTelegramMessage = await sendToTelegramTopic(topicId, `${prefix}\n${safeBody}`, replyToMessageId);
     }
