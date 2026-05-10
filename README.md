@@ -240,7 +240,7 @@ npm start
 Si le bridge tourne sur le serveur avec PM2, vous pouvez re-afficher le dernier QR code genere via les logs:
 
 ```bash
-ssh debian@6infocom.fr 'python3 - <<"PY"
+ssh debian@YOUR_SERVER 'python3 - <<"PY"
 from pathlib import Path
 
 p = Path("/home/debian/.pm2/logs/bridge-whatsapp-telegram-out.log")
