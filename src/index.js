@@ -560,17 +560,20 @@ async function relayTelegramReactionToWhatsApp(ctx) {
 }
 
 async function relayWhatsAppMessageToTelegram(msg) {
-  if (!shouldProcessWaMessage(msg)) return;
   if (!msg.from.endsWith("@g.us")) return;
 
   const topicId = cfg.waGroupToTopic[msg.from];
   if (!topicId) return;
 
   const rawText = msg.body || msg.caption || "";
+  const hasRelayablePayload = msg.hasMedia || Boolean(rawText);
+  if (!hasRelayablePayload) return;
 
   if (msg.fromMe && isRecentBridgeOutboundMessage(msg.from, rawText)) {
     return;
   }
+
+  if (!shouldProcessWaMessage(msg)) return;
 
   try {
     const replyToMessageId = await resolveTelegramReplyMessageId(msg);
