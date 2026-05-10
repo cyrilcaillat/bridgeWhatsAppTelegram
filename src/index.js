@@ -28,6 +28,7 @@ const WA_RECONNECT_DELAY_MS = 5000;
 const WA_RECONNECT_RETRY_DELAY_MS = 15000;
 const WA_BACKFILL_WINDOW_MS = 24 * 60 * 60 * 1000;
 const WA_BACKFILL_LIMIT = 500;
+const WA_BACKFILL_RETRY_DELAY_MS = 60 * 1000;
 const BRIDGE_STATE_PATH = process.env.BRIDGE_STATE_PATH || "./bridge-state.json";
 let lastWhatsAppGroups = [];
 let waReconnectTimer = null;
@@ -630,7 +631,7 @@ async function relayWhatsAppMessageToTelegram(msg, source = "unknown") {
   }
 }
 
-async function backfillRecentWhatsAppMessages() {
+async function backfillRecentWhatsAppMessages(passLabel = "initial") {
   const minTimestampMs = Date.now() - WA_BACKFILL_WINDOW_MS;
   let relayedCount = 0;
 
@@ -643,6 +644,16 @@ async function backfillRecentWhatsAppMessages() {
       const recentMessages = messages
         .filter((msg) => (msg.timestamp * 1000) >= minTimestampMs)
         .sort((a, b) => a.timestamp - b.timestamp);
+      let groupRelayedCount = 0;
+
+      log("debug", "WA backfill scan", {
+        pass: passLabel,
+        waGroupId,
+        fetchedCount: messages.length,
+        inWindowCount: recentMessages.length,
+        windowMs: WA_BACKFILL_WINDOW_MS,
+        limit: WA_BACKFILL_LIMIT
+      });
 
       for (const msg of recentMessages) {
         const waMessageId = msg.id?._serialized;
@@ -654,15 +665,34 @@ async function backfillRecentWhatsAppMessages() {
 
         if (existingLink?.tgMessageId) continue;
 
-        await relayWhatsAppMessageToTelegram(msg);
+        await relayWhatsAppMessageToTelegram(msg, `backfill:${passLabel}`);
         relayedCount += 1;
+        groupRelayedCount += 1;
       }
+
+      log("debug", "WA backfill group completed", {
+        pass: passLabel,
+        waGroupId,
+        relayedCount: groupRelayedCount
+      });
     } catch (error) {
       log("warn", `Failed to backfill messages for ${waGroupId}`, error.message);
     }
   }
 
-  log("info", `WhatsApp backfill completed (${relayedCount} message(s) relayed).`);
+  log("info", `WhatsApp backfill (${passLabel}) completed (${relayedCount} message(s) relayed).`);
+}
+
+async function runStartupBackfill() {
+  await backfillRecentWhatsAppMessages("initial");
+
+  setTimeout(async () => {
+    try {
+      await backfillRecentWhatsAppMessages("retry_60s");
+    } catch (error) {
+      log("warn", "WhatsApp startup backfill retry failed", error.message);
+    }
+  }, WA_BACKFILL_RETRY_DELAY_MS).unref();
 }
 
 async function refreshWhatsAppGroupsSnapshot() {
@@ -738,7 +768,7 @@ wa.on("ready", async () => {
   log("info", "WhatsApp client is ready.");
   try {
     await refreshWhatsAppGroupsSnapshot();
-    await backfillRecentWhatsAppMessages();
+    await runStartupBackfill();
   } catch (error) {
     if (isDetachedFrameError(error)) {
       log("warn", "WhatsApp groups snapshot skipped because browser frame was reloaded");
