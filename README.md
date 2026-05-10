@@ -2,7 +2,23 @@
 
 Bridge bidirectionnel entre des groupes WhatsApp et des topics Telegram.
 
-## Fonctions
+## Sommaire
+
+- Fonctionnalites
+- Prerequis
+- Installation rapide
+- Configuration Telegram
+- Configuration `.env`
+- Recuperation des IDs WhatsApp
+- Mapping JID WhatsApp -> nom d'affichage
+- Lancement local (QR code)
+- Production avec PM2
+- Deploiement serveur (Debian)
+- Troubleshooting
+- Scripts
+- Limites et conformite
+
+## Fonctionnalites
 
 - Relai WhatsApp -> Telegram
 - Relai Telegram -> WhatsApp
@@ -18,14 +34,14 @@ Bridge bidirectionnel entre des groupes WhatsApp et des topics Telegram.
 - Un supergroupe Telegram avec topics actives
 - Un compte WhatsApp deja connecte sur telephone
 
-## Installation
+## Installation rapide
 
 ```bash
 npm install
 cp .env.example .env
 ```
 
-## Etape 1 - Configurer Telegram
+## Configuration Telegram
 
 ### 1. Creer le bot
 
@@ -70,14 +86,22 @@ curl -s "https://api.telegram.org/bot<TG_TOKEN>/getUpdates" | jq
 
 ### 5. Trouver les IDs de topics Telegram
 
+Prerequis: le bridge doit etre lance pour que `getUpdates` remonte bien les messages recents du bot.
+
+Lancer le bridge localement:
+
+```bash
+npm start
+```
+
 1. Envoyer un message dans chaque topic
 2. Refaire l'appel `getUpdates`
 3. Recuperer `message_thread_id` pour chaque topic
 4. Associer ces IDs avec les groupes WhatsApp dans `WA_GROUP_IDS`
 
-## Etape 2 - Configurer les variables .env
+## Configuration `.env`
 
-Exemple minimal dans le fichier .env:
+Exemple minimal:
 
 ```env
 TG_TOKEN=123456789:ABCDEF
@@ -102,21 +126,7 @@ LOG_LEVEL=info
 - `HEADLESS` (optionnel, defaut `true`): execution headless du navigateur WhatsApp Web
 - `LOG_LEVEL` (optionnel, defaut `info`): niveau de logs (`error`, `warn`, `info`, `debug`)
 
-## Etape 3 - Premier lancement local et QR code
-
-Lancer:
-
-```bash
-npm start
-```
-
-Au premier lancement, scanner le QR code affiche dans le terminal:
-
-WhatsApp -> Appareils connectes -> Connecter un appareil
-
-Ensuite, le bridge affiche la liste des groupes detectes.
-
-## Etape 4 - Recuperer les IDs des groupes WhatsApp
+## Recuperation des IDs WhatsApp
 
 Apres connexion WhatsApp, les logs affichent:
 
@@ -134,9 +144,9 @@ WA_GROUP_IDS=120363123456789012@g.us:101,120363987654321098@g.us:102
 
 Le fichier `WA_GROUPS_LIST_PATH` contient aussi une section `Telegram topics` avec les IDs detectes. Pour enrichir cette section, envoyer au moins un message dans chaque topic Telegram.
 
-## Etape 4b - Mapping JID WhatsApp -> nom d'affichage (optionnel)
+## Mapping JID WhatsApp -> nom d'affichage
 
-Quand WhatsApp ne retourne pas de nom de contact dans un groupe, le bridge peut utiliser un fichier JSON de mapping.
+Quand WhatsApp ne retourne pas de nom de contact dans un groupe, le bridge peut utiliser un mapping dans le fichier d'etat.
 
 Le mapping est stocke dans le meme fichier d'etat que les groupes/messages: `BRIDGE_STATE_PATH` (defaut `./bridge-state.json`), dans la section `waUserMappings`.
 
@@ -145,16 +155,15 @@ Exemple:
 ```json
 {
   "waUserMappings": {
-  "33612345678@c.us": "Alice",
-  "33698765432@c.us": "Bob"
+    "33612345678@c.us": "Alice",
+    "33698765432@c.us": "Bob"
   }
 }
 ```
 
-Si un JID n'est pas mappe, le bridge garde le JID brut.
+Comportement:
 
-Comportement automatique:
-
+- Si un JID n'est pas mappe, le bridge garde le JID brut.
 - Si le bridge ne trouve pas de nom pour un JID, il ajoute ce JID dans `waUserMappings` avec la valeur `none`.
 - Tant qu'une entree vaut `none`, le bridge affiche le JID brut dans Telegram.
 - Vous pouvez ensuite remplacer manuellement `none` par le nom voulu dans `bridge-state.json`.
@@ -173,7 +182,19 @@ mv bridge-state.tmp bridge-state.json &&
 '
 ```
 
-## Etape 5 - Dependances systeme pour Chromium (Debian/Ubuntu)
+## Lancement local (QR code)
+
+```bash
+npm start
+```
+
+Au premier lancement, scanner le QR code affiche dans le terminal:
+
+WhatsApp -> Appareils connectes -> Connecter un appareil
+
+Ensuite, le bridge affiche la liste des groupes detectes.
+
+## Dependances systeme pour Chromium (Debian/Ubuntu)
 
 Puppeteer/whatsapp-web.js necessite des librairies systeme. Les installer une fois avant le premier lancement:
 
@@ -183,7 +204,7 @@ sudo apt-get install -y libnspr4 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2
   libpango-1.0-0 libcairo2 libgtk-3-0 libx11-xcb1
 ```
 
-## Etape 6 - Demarrage en production avec PM2
+## Production avec PM2
 
 ### Option A - PM2 global (si droits sudo)
 
@@ -205,14 +226,13 @@ npm install -g pm2 --prefix "$HOME/.local"
 
 ### Demarrage automatique au reboot (mode utilisateur, avec sudo)
 
-Pour que PM2 relance le bridge apres un reboot serveur:
-
 ```bash
 sudo env PATH=$PATH:/home/debian/.local/bin:/usr/local/bin pm2 startup systemd -u debian --hp /home/debian
 ~/.local/bin/pm2 save
 ```
 
 Pour desactiver:
+
 ```bash
 ~/.local/bin/pm2 unstartup systemd
 ```
@@ -226,28 +246,16 @@ Commandes utiles (mode utilisateur):
 ~/.local/bin/pm2 logs bridge-whatsapp-telegram --lines 100 --nostream
 ```
 
-## Etape 7 - Deploiement sur serveur (Debian)
+## Deploiement serveur (Debian)
 
 ### Premier deploiement
-
-Cloner le depot sur le serveur:
 
 ```bash
 git clone https://github.com/cyrilcaillat/bridgeWhatsAppTelegram.git /home/debian/bridgeWhatsAppTelegram
 cd /home/debian/bridgeWhatsAppTelegram
 npm install --omit=dev
-```
-
-Creer et remplir le `.env`:
-
-```bash
 cp .env.example .env
 nano .env
-```
-
-Lancer:
-
-```bash
 ~/.local/bin/pm2 start src/index.js --name bridge-whatsapp-telegram
 ~/.local/bin/pm2 save
 ```
@@ -334,16 +342,10 @@ Utiliser une ligne unique `WA_GROUP_IDS` avec des paires separees par des virgul
 WA_GROUP_IDS=ID_GROUPE_1@g.us:101,ID_GROUPE_2@g.us:102,ID_GROUPE_3@g.us:103
 ```
 
-## Demarrage
-
-```bash
-npm start
-```
-
 ## Scripts
 
-- npm start: lance le bridge
-- npm run lint: verifie la syntaxe JavaScript
+- `npm start`: lance le bridge
+- `npm run lint`: verifie la syntaxe JavaScript
 
 ## Limites et conformite
 
