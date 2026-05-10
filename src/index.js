@@ -453,6 +453,11 @@ function rememberMessageLink(waGroupId, waMessageId, topicId, tgMessageId, waSta
 async function resolveTelegramReplyMessageId(msg) {
   if (!msg.hasQuotedMsg) return null;
 
+  const waGroupId = msg.from?.endsWith("@g.us")
+    ? msg.from
+    : (msg.to?.endsWith("@g.us") ? msg.to : null);
+  if (!waGroupId) return null;
+
   try {
     const quoted = await msg.getQuotedMessage();
     const quotedWaMessageId = quoted?.id?._serialized;
@@ -461,8 +466,8 @@ async function resolveTelegramReplyMessageId(msg) {
     pruneExpiredMessageLinks();
 
     const quotedStableId = extractWaStableMessageId(quoted);
-    const link = waToTgMessageLinks.get(buildWaMessageKey(msg.from, quotedWaMessageId))
-      || (quotedStableId ? waToTgMessageLinks.get(buildWaMessageKey(msg.from, `id:${quotedStableId}`)) : null);
+    const link = waToTgMessageLinks.get(buildWaMessageKey(waGroupId, quotedWaMessageId))
+      || (quotedStableId ? waToTgMessageLinks.get(buildWaMessageKey(waGroupId, `id:${quotedStableId}`)) : null);
     return link?.tgMessageId || null;
   } catch (error) {
     log("debug", "Failed to resolve Telegram reply target from WhatsApp message", error.message);
@@ -560,16 +565,19 @@ async function relayTelegramReactionToWhatsApp(ctx) {
 }
 
 async function relayWhatsAppMessageToTelegram(msg) {
-  if (!msg.from.endsWith("@g.us")) return;
+  const waGroupId = msg.from?.endsWith("@g.us")
+    ? msg.from
+    : (msg.to?.endsWith("@g.us") ? msg.to : null);
+  if (!waGroupId) return;
 
-  const topicId = cfg.waGroupToTopic[msg.from];
+  const topicId = cfg.waGroupToTopic[waGroupId];
   if (!topicId) return;
 
   const rawText = msg.body || msg.caption || "";
   const hasRelayablePayload = msg.hasMedia || Boolean(rawText);
   if (!hasRelayablePayload) return;
 
-  if (msg.fromMe && isRecentBridgeOutboundMessage(msg.from, rawText)) {
+  if (msg.fromMe && isRecentBridgeOutboundMessage(waGroupId, rawText)) {
     return;
   }
 
@@ -598,7 +606,7 @@ async function relayWhatsAppMessageToTelegram(msg) {
     }
 
     if (sentTelegramMessage?.message_id && msg.id?._serialized) {
-      rememberMessageLink(msg.from, msg.id._serialized, topicId, sentTelegramMessage.message_id, msg.id?.id);
+      rememberMessageLink(waGroupId, msg.id._serialized, topicId, sentTelegramMessage.message_id, msg.id?.id);
     }
   } catch (error) {
     log("error", "Failed to relay message from WhatsApp to Telegram", error.message);
