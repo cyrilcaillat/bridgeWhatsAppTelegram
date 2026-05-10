@@ -5,6 +5,7 @@ require("dotenv").config();
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const qrcode = require("qrcode-terminal");
 const { Telegraf, Input } = require("telegraf");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
@@ -19,18 +20,48 @@ const waToTgMessageLinks = new Map();
 const tgToWaMessageLinks = new Map();
 const recentProcessedWaMessages = new Map();
 const waUserDisplayMap = new Map();
+const WA_USER_MAPPING_NONE = "none";
 const MESSAGE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PROCESSED_WA_MESSAGE_TTL_MS = 5 * 60 * 1000;
+const RECENT_OUTBOUND_TTL_MS = 2 * 60 * 1000;
+const WA_RECONNECT_DELAY_MS = 5000;
+const WA_RECONNECT_RETRY_DELAY_MS = 15000;
 const BRIDGE_STATE_PATH = process.env.BRIDGE_STATE_PATH || "./bridge-state.json";
 let lastWhatsAppGroups = [];
 let waReconnectTimer = null;
 let waReconnectInProgress = false;
+let loadedStateSignature = null;
+
+function computeStateSignature(raw) {
+  return crypto.createHash("sha1").update(String(raw || "")).digest("hex");
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function normalizeString(value) {
+  return isNonEmptyString(value) ? value.trim() : "";
+}
+
+function readStateFromDisk() {
+  if (!fs.existsSync(BRIDGE_STATE_PATH)) return null;
+
+  const raw = fs.readFileSync(BRIDGE_STATE_PATH, "utf8");
+  return {
+    parsed: JSON.parse(raw),
+    signature: computeStateSignature(raw)
+  };
+}
 
 function loadState() {
   try {
-    if (!fs.existsSync(BRIDGE_STATE_PATH)) return;
-    const raw = JSON.parse(fs.readFileSync(BRIDGE_STATE_PATH, "utf8"));
+    const diskState = readStateFromDisk();
+    if (!diskState) return;
+
+    const raw = diskState.parsed;
     const now = Date.now();
+    loadedStateSignature = diskState.signature;
 
     for (const [k, v] of Object.entries(raw.messageLinks?.waToTg || {})) {
       if (v.expiresAt > now) waToTgMessageLinks.set(k, v);
@@ -56,8 +87,9 @@ function loadState() {
 
     let waUserMappingsLoaded = 0;
     for (const [jid, displayName] of Object.entries(raw.waUserMappings || {})) {
-      if (!jid || typeof displayName !== "string" || !displayName.trim()) continue;
-      waUserDisplayMap.set(String(jid), displayName.trim());
+      const normalizedName = normalizeString(displayName);
+      if (!jid || !normalizedName) continue;
+      waUserDisplayMap.set(String(jid), normalizedName);
       waUserMappingsLoaded++;
     }
 
@@ -69,6 +101,30 @@ function loadState() {
 
 function saveState() {
   try {
+    let diskState = null;
+    try {
+      diskState = readStateFromDisk();
+    } catch (error) {
+      log("warn", `Failed to read current state from ${BRIDGE_STATE_PATH} before save`, error.message);
+    }
+
+    if (diskState && loadedStateSignature && diskState.signature !== loadedStateSignature) {
+      log("warn", `State file changed on disk since load; applying safe merge for ${BRIDGE_STATE_PATH}`);
+    }
+
+    const mergedWaUserMappings = new Map(waUserDisplayMap);
+    for (const [jid, displayName] of Object.entries(diskState?.parsed?.waUserMappings || {})) {
+      const normalizedName = normalizeString(displayName);
+      if (!jid || !normalizedName) continue;
+      // Keep manual edits from disk if the file changed externally.
+      mergedWaUserMappings.set(String(jid), normalizedName);
+    }
+
+    waUserDisplayMap.clear();
+    for (const [jid, displayName] of mergedWaUserMappings.entries()) {
+      waUserDisplayMap.set(jid, displayName);
+    }
+
     const topics = Object.fromEntries(
       [...topicCatalog.entries()].map(([key, entry]) => [key, { id: entry.id, name: entry.name || null }])
     );
@@ -82,10 +138,17 @@ function saveState() {
         tgToWa: Object.fromEntries(tgToWaMessageLinks)
       }
     };
-    fs.writeFileSync(BRIDGE_STATE_PATH, JSON.stringify(data), "utf8");
+
+    const serialized = JSON.stringify(data);
+    fs.writeFileSync(BRIDGE_STATE_PATH, serialized, "utf8");
+    loadedStateSignature = computeStateSignature(serialized);
   } catch (error) {
     log("warn", `Failed to save state to ${BRIDGE_STATE_PATH}`, error.message);
   }
+}
+
+function isWaNoneMapping(value) {
+  return normalizeString(value).toLowerCase() === WA_USER_MAPPING_NONE;
 }
 
 function resolveWhatsAppSenderName(msg, contact) {
@@ -98,7 +161,18 @@ function resolveWhatsAppSenderName(msg, contact) {
   }
 
   const authorJid = msg.author ? String(msg.author) : "";
-  return waUserDisplayMap.get(authorJid) || authorJid || "Unknown";
+  if (!authorJid) return "Unknown";
+
+  const mappedName = waUserDisplayMap.get(authorJid);
+  const normalizedMappedName = normalizeString(mappedName);
+  if (normalizedMappedName) {
+    return isWaNoneMapping(normalizedMappedName) ? authorJid : normalizedMappedName;
+  }
+
+  waUserDisplayMap.set(authorJid, WA_USER_MAPPING_NONE);
+  saveState();
+  log("info", `Unknown WhatsApp JID tracked in state file: ${authorJid}`);
+  return authorJid;
 }
 
 Object.entries(cfg.waGroupToTopic).forEach(([waId, topicId]) => {
@@ -210,7 +284,7 @@ function rememberBridgeOutboundMessage(waGroupId, text) {
 
   queue.push({
     text: text || "",
-    expiresAt: Date.now() + 2 * 60 * 1000
+    expiresAt: Date.now() + RECENT_OUTBOUND_TTL_MS
   });
 
   recentBridgeOutboundMessages.set(key, queue);
@@ -326,7 +400,7 @@ function scheduleWhatsAppReconnect(reason) {
       await wa.initialize();
     } catch (error) {
       log("error", "WhatsApp reinitialization failed", error.message);
-      retryDelayMs = 15000;
+        retryDelayMs = WA_RECONNECT_RETRY_DELAY_MS;
     } finally {
       waReconnectInProgress = false;
     }
@@ -338,7 +412,7 @@ function scheduleWhatsAppReconnect(reason) {
       }, retryDelayMs);
       waReconnectTimer.unref?.();
     }
-  }, 5000);
+  }, WA_RECONNECT_DELAY_MS);
 
   waReconnectTimer.unref?.();
 }

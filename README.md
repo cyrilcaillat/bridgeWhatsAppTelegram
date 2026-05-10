@@ -153,6 +153,12 @@ Exemple:
 
 Si un JID n'est pas mappe, le bridge garde le JID brut.
 
+Comportement automatique:
+
+- Si le bridge ne trouve pas de nom pour un JID, il ajoute ce JID dans `waUserMappings` avec la valeur `none`.
+- Tant qu'une entree vaut `none`, le bridge affiche le JID brut dans Telegram.
+- Vous pouvez ensuite remplacer manuellement `none` par le nom voulu dans `bridge-state.json`.
+
 ## Etape 5 - Dependances systeme pour Chromium (Debian/Ubuntu)
 
 Puppeteer/whatsapp-web.js necessite des librairies systeme. Les installer une fois avant le premier lancement:
