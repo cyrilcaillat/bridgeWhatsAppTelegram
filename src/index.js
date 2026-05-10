@@ -26,6 +26,8 @@ const PROCESSED_WA_MESSAGE_TTL_MS = 5 * 60 * 1000;
 const RECENT_OUTBOUND_TTL_MS = 2 * 60 * 1000;
 const WA_RECONNECT_DELAY_MS = 5000;
 const WA_RECONNECT_RETRY_DELAY_MS = 15000;
+const WA_BACKFILL_WINDOW_MS = 2 * 60 * 60 * 1000;
+const WA_BACKFILL_LIMIT = 100;
 const BRIDGE_STATE_PATH = process.env.BRIDGE_STATE_PATH || "./bridge-state.json";
 let lastWhatsAppGroups = [];
 let waReconnectTimer = null;
@@ -585,6 +587,41 @@ async function relayWhatsAppMessageToTelegram(msg) {
   }
 }
 
+async function backfillRecentWhatsAppMessages() {
+  const minTimestampMs = Date.now() - WA_BACKFILL_WINDOW_MS;
+  let relayedCount = 0;
+
+  pruneExpiredMessageLinks();
+
+  for (const waGroupId of Object.keys(cfg.waGroupToTopic)) {
+    try {
+      const chat = await wa.getChatById(waGroupId);
+      const messages = await chat.fetchMessages({ limit: WA_BACKFILL_LIMIT });
+      const recentMessages = messages
+        .filter((msg) => (msg.timestamp * 1000) >= minTimestampMs)
+        .sort((a, b) => a.timestamp - b.timestamp);
+
+      for (const msg of recentMessages) {
+        const waMessageId = msg.id?._serialized;
+        if (!waMessageId) continue;
+
+        const stableId = extractWaStableMessageId(waMessageId);
+        const existingLink = waToTgMessageLinks.get(buildWaMessageKey(waGroupId, waMessageId))
+          || (stableId ? waToTgMessageLinks.get(buildWaMessageKey(waGroupId, `id:${stableId}`)) : null);
+
+        if (existingLink?.tgMessageId) continue;
+
+        await relayWhatsAppMessageToTelegram(msg);
+        relayedCount += 1;
+      }
+    } catch (error) {
+      log("warn", `Failed to backfill messages for ${waGroupId}`, error.message);
+    }
+  }
+
+  log("info", `WhatsApp backfill completed (${relayedCount} message(s) relayed).`);
+}
+
 async function refreshWhatsAppGroupsSnapshot() {
   const chats = await wa.getChats();
   const groups = getWhatsAppGroups(chats);
@@ -658,6 +695,7 @@ wa.on("ready", async () => {
   log("info", "WhatsApp client is ready.");
   try {
     await refreshWhatsAppGroupsSnapshot();
+    await backfillRecentWhatsAppMessages();
   } catch (error) {
     if (isDetachedFrameError(error)) {
       log("warn", "WhatsApp groups snapshot skipped because browser frame was reloaded");
