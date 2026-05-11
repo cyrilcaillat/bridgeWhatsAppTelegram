@@ -155,18 +155,24 @@ La liste des groupes WhatsApp detectes et des topics Telegram est conservee dans
 ## Bot API Telegram local (Docker, optionnel)
 
 Utiliser un Bot API local permet surtout de mieux gerer les gros fichiers que l'API cloud peut refuser (erreur 413).
+Le compose fourni construit le serveur Bot API depuis le depot officiel Telegram (`tdlib/telegram-bot-api`).
 
 Prerequis:
 
 - Un compte Telegram dev pour obtenir `api_id` et `api_hash` sur `https://my.telegram.org`
 - Docker + Docker Compose sur le serveur
 
+Creer un fichier dedie pour Docker (recommande):
+
+```bash
+cp .env.docker.example .env.docker
+nano .env.docker
+```
+
 Lancer le service:
 
 ```bash
-export TELEGRAM_API_ID=123456
-export TELEGRAM_API_HASH=your_api_hash
-docker compose up -d telegram-bot-api
+docker compose --env-file .env.docker up -d --build telegram-bot-api
 ```
 
 Configurer ensuite le bridge (`.env`):

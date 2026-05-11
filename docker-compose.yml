@@ -1,6 +1,10 @@
 services:
   telegram-bot-api:
-    image: aiogram/telegram-bot-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.telegram-bot-api
+      args:
+        TELEGRAM_BOT_API_REF: ${TELEGRAM_BOT_API_REF:-master}
     container_name: telegram-bot-api
     restart: unless-stopped
     environment:
