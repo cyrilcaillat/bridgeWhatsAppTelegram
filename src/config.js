@@ -5,6 +5,20 @@ function parseBool(value, defaultValue) {
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
 }
 
+function parseNonNegativeInt(value, defaultValue) {
+  if (value == null || value === "") return defaultValue;
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) return defaultValue;
+  return parsed;
+}
+
+function parseOptionalUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return undefined;
+  return raw.replace(/\/+$/, "");
+}
+
 function parseGroupMap(raw) {
   if (!raw || !raw.trim()) return {};
 
@@ -37,7 +51,17 @@ function loadConfig() {
   return {
     tgToken: process.env.TG_TOKEN,
     tgGroupId: process.env.TG_GROUP_ID,
+    tgApiBaseUrl: parseOptionalUrl(process.env.TG_API_BASE_URL),
+    bridgeStatePath: process.env.BRIDGE_STATE_PATH || "./bridge-state.json",
     waGroupToTopic: parseGroupMap(process.env.WA_GROUP_IDS || ""),
+    messageLinkTtlMs: parseNonNegativeInt(process.env.MESSAGE_LINK_TTL_MS, 7 * 24 * 60 * 60 * 1000),
+    processedWaMessageTtlMs: parseNonNegativeInt(process.env.PROCESSED_WA_MESSAGE_TTL_MS, 5 * 60 * 1000),
+    recentOutboundTtlMs: parseNonNegativeInt(process.env.RECENT_OUTBOUND_TTL_MS, 2 * 60 * 1000),
+    waReconnectDelayMs: parseNonNegativeInt(process.env.WA_RECONNECT_DELAY_MS, 5000),
+    waReconnectRetryDelayMs: parseNonNegativeInt(process.env.WA_RECONNECT_RETRY_DELAY_MS, 15000),
+    waBackfillWindowMs: parseNonNegativeInt(process.env.WA_BACKFILL_WINDOW_MS, 24 * 60 * 60 * 1000),
+    waBackfillLimit: parseNonNegativeInt(process.env.WA_BACKFILL_LIMIT, 500),
+    waBackfillRetryDelayMs: parseNonNegativeInt(process.env.WA_BACKFILL_RETRY_DELAY_MS, 60 * 1000),
     tgToWaIncludePrefix: parseBool(process.env.TG_TO_WA_INCLUDE_PREFIX, false),
     tgToWaSendReadReceiptOnActivity: parseBool(process.env.TG_TO_WA_SEND_READ_RECEIPT_ON_ACTIVITY, false),
     tgToWaPrefix: process.env.TG_TO_WA_PREFIX || "[Bridge Telegram]",

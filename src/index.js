@@ -12,7 +12,10 @@ const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const { loadConfig } = require("./config");
 
 const cfg = loadConfig();
-const tg = new Telegraf(cfg.tgToken);
+const tg = new Telegraf(
+  cfg.tgToken,
+  cfg.tgApiBaseUrl ? { telegram: { apiRoot: cfg.tgApiBaseUrl } } : undefined
+);
 const topicToWa = Object.fromEntries(Object.entries(cfg.waGroupToTopic).map(([waId, topicId]) => [String(topicId), waId]));
 const topicCatalog = new Map();
 const recentBridgeOutboundMessages = new Map();
@@ -21,15 +24,15 @@ const tgToWaMessageLinks = new Map();
 const recentProcessedWaMessages = new Map();
 const waUserDisplayMap = new Map();
 const WA_USER_MAPPING_NONE = "none";
-const MESSAGE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const PROCESSED_WA_MESSAGE_TTL_MS = 5 * 60 * 1000;
-const RECENT_OUTBOUND_TTL_MS = 2 * 60 * 1000;
-const WA_RECONNECT_DELAY_MS = 5000;
-const WA_RECONNECT_RETRY_DELAY_MS = 15000;
-const WA_BACKFILL_WINDOW_MS = 24 * 60 * 60 * 1000;
-const WA_BACKFILL_LIMIT = 500;
-const WA_BACKFILL_RETRY_DELAY_MS = 60 * 1000;
-const BRIDGE_STATE_PATH = process.env.BRIDGE_STATE_PATH || "./bridge-state.json";
+const MESSAGE_LINK_TTL_MS = cfg.messageLinkTtlMs;
+const PROCESSED_WA_MESSAGE_TTL_MS = cfg.processedWaMessageTtlMs;
+const RECENT_OUTBOUND_TTL_MS = cfg.recentOutboundTtlMs;
+const WA_RECONNECT_DELAY_MS = cfg.waReconnectDelayMs;
+const WA_RECONNECT_RETRY_DELAY_MS = cfg.waReconnectRetryDelayMs;
+const WA_BACKFILL_WINDOW_MS = cfg.waBackfillWindowMs;
+const WA_BACKFILL_LIMIT = cfg.waBackfillLimit;
+const WA_BACKFILL_RETRY_DELAY_MS = cfg.waBackfillRetryDelayMs;
+const BRIDGE_STATE_PATH = cfg.bridgeStatePath;
 let lastWhatsAppGroups = [];
 let waReconnectTimer = null;
 let waReconnectInProgress = false;

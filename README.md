@@ -113,9 +113,19 @@ LOG_LEVEL=info
 
 - `TG_TOKEN` (obligatoire): token du bot Telegram
 - `TG_GROUP_ID` (obligatoire): identifiant du supergroupe Telegram
+- `TG_API_BASE_URL` (optionnel): URL de base d'un serveur Bot API Telegram local (ex: `http://127.0.0.1:8081`)
 - `WA_GROUP_IDS` (optionnel mais recommande): correspondances groupe WhatsApp -> topic Telegram
   - Format: `WA_GROUP_ID:TG_TOPIC_ID`
   - Entrees separees par des virgules
+- `BRIDGE_STATE_PATH` (optionnel, defaut `./bridge-state.json`): chemin du fichier d'etat interne
+- `MESSAGE_LINK_TTL_MS` (optionnel, defaut `604800000`): duree de conservation des liens de messages WA<->TG
+- `PROCESSED_WA_MESSAGE_TTL_MS` (optionnel, defaut `300000`): anti-duplication des evenements WA
+- `RECENT_OUTBOUND_TTL_MS` (optionnel, defaut `120000`): fenetre de detection d'echo Telegram->WhatsApp
+- `WA_RECONNECT_DELAY_MS` (optionnel, defaut `5000`): delai avant tentative de reconnexion WhatsApp
+- `WA_RECONNECT_RETRY_DELAY_MS` (optionnel, defaut `15000`): delai entre deux tentatives de reconnexion
+- `WA_BACKFILL_WINDOW_MS` (optionnel, defaut `86400000`): fenetre temporelle de rattrapage WA au demarrage
+- `WA_BACKFILL_LIMIT` (optionnel, defaut `500`): nombre max de messages WA charges par groupe pendant le backfill
+- `WA_BACKFILL_RETRY_DELAY_MS` (optionnel, defaut `60000`): delai de la deuxieme passe de backfill au demarrage
 - `TG_TO_WA_INCLUDE_PREFIX` (optionnel, defaut `false`): ajoute un prefixe visuel sur les messages Telegram envoyes vers WhatsApp
 - `TG_TO_WA_PREFIX` (optionnel, defaut `[Bridge Telegram]`): texte de prefixe utilise quand `TG_TO_WA_INCLUDE_PREFIX=true`
 - `TG_TO_WA_INCLUDE_USERNAME` (optionnel, defaut `true`): inclut le nom/profil Telegram dans le message WhatsApp relaye
@@ -141,6 +151,36 @@ WA_GROUP_IDS=120363123456789012@g.us:101,120363987654321098@g.us:102
 ```
 
 La liste des groupes WhatsApp detectes et des topics Telegram est conservee dans `bridge-state.json`.
+
+## Bot API Telegram local (Docker, optionnel)
+
+Utiliser un Bot API local permet surtout de mieux gerer les gros fichiers que l'API cloud peut refuser (erreur 413).
+
+Prerequis:
+
+- Un compte Telegram dev pour obtenir `api_id` et `api_hash` sur `https://my.telegram.org`
+- Docker + Docker Compose sur le serveur
+
+Lancer le service:
+
+```bash
+export TELEGRAM_API_ID=123456
+export TELEGRAM_API_HASH=your_api_hash
+docker compose up -d telegram-bot-api
+```
+
+Configurer ensuite le bridge (`.env`):
+
+```env
+TG_API_BASE_URL=http://127.0.0.1:8081
+```
+
+Appliquer le changement:
+
+```bash
+~/.local/bin/pm2 restart bridge-whatsapp-telegram --update-env
+~/.local/bin/pm2 save
+```
 
 ## Mapping JID WhatsApp -> nom d'affichage
 
