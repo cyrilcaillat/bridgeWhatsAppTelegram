@@ -165,14 +165,16 @@ Prerequis:
 Creer un fichier dedie pour Docker (recommande):
 
 ```bash
-cp docker/telegram-bot-api/.env.example .env.docker
-nano .env.docker
+cd docker/telegram-bot-api
+cp .env.example .env
+nano .env
 ```
 
 Lancer le service:
 
 ```bash
-docker compose --env-file .env.docker up -d --build telegram-bot-api
+cd docker/telegram-bot-api
+docker compose up -d --build
 ```
 
 Configurer ensuite le bridge (`.env`):

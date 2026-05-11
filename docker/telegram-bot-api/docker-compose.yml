@@ -2,7 +2,7 @@ services:
   telegram-bot-api:
     build:
       context: .
-      dockerfile: docker/telegram-bot-api/Dockerfile
+      dockerfile: Dockerfile
       args:
         TELEGRAM_BOT_API_REF: ${TELEGRAM_BOT_API_REF:-master}
     container_name: telegram-bot-api
