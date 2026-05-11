@@ -371,6 +371,11 @@ function isDetachedFrameError(error) {
   return String(error?.message || "").includes("detached Frame");
 }
 
+function isTelegramPayloadTooLargeError(error) {
+  const message = String(error?.message || "");
+  return message.includes("413") || message.toLowerCase().includes("request entity too large");
+}
+
 function scheduleWhatsAppReconnect(reason) {
   if (waReconnectTimer || waReconnectInProgress) {
     log("warn", `WhatsApp reconnect already scheduled/in progress (${reason})`);
@@ -597,7 +602,25 @@ async function relayWhatsAppMessageToTelegram(msg, source = "unknown") {
 
     if (msg.hasMedia) {
       const media = await msg.downloadMedia();
-      sentTelegramMessage = await sendMediaToTelegram(topicId, media, prefix, replyToMessageId);
+      try {
+        sentTelegramMessage = await sendMediaToTelegram(topicId, media, prefix, replyToMessageId);
+      } catch (error) {
+        if (!isTelegramPayloadTooLargeError(error)) throw error;
+
+        const fallbackNotice = escapeMarkdownV2("Media non transfere: fichier trop volumineux (Telegram 413)");
+        const fallbackText = safeBody
+          ? `${prefix}\n${fallbackNotice}\n${safeBody}`
+          : `${prefix}\n${fallbackNotice}`;
+
+        sentTelegramMessage = await sendToTelegramTopic(topicId, fallbackText, replyToMessageId);
+        log("warn", "WA->TG media fallback applied after Telegram 413", {
+          source,
+          waGroupId,
+          topicId,
+          waMessageId: msg.id?._serialized || null,
+          mediaType: msg.type || null
+        });
+      }
 
       // Captions from some WhatsApp media types can be flaky on Telegram.
       // Send text as a separate message replying to the media to keep content visible.
