@@ -292,6 +292,28 @@ Commandes utiles (mode utilisateur):
 ~/.local/bin/pm2 logs bridge-whatsapp-telegram --lines 100 --nostream
 ```
 
+### Clean Restart du bridge (sans impacter les autres services)
+
+Si le bridge crashe ou redémarre en boucle, un "clean restart" peut résoudre le problème:
+
+```bash
+cd /home/debian/bridgeWhatsAppTelegram
+~/.local/bin/pm2 delete bridge-whatsapp-telegram
+~/.local/bin/pm2 start src/index.js --name bridge-whatsapp-telegram --update-env
+~/.local/bin/pm2 save
+```
+
+Ce processus:
+- Supprime le processus du bridge de la liste PM2
+- Redémarre le bridge complètement neuf
+- Laisse les autres services intacts
+
+Puis vérifier le statut:
+
+```bash
+~/.local/bin/pm2 status bridge-whatsapp-telegram
+```
+
 ## Deploiement serveur (Debian)
 
 ### Premier deploiement
