@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim AS build
-
-ARG TELEGRAM_BOT_API_REF=master
+#build: docker compose build --no-cache
+ARG TELEGRAM_BOT_API_REF=01a3679c0bbf9bbba03d1d3e20f621fa4becddcc
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   build-essential \
