@@ -165,7 +165,7 @@ Prerequis:
 Creer un fichier dedie pour Docker (recommande):
 
 ```bash
-cp .env.docker.example .env.docker
+cp docker/telegram-bot-api/.env.example .env.docker
 nano .env.docker
 ```
 
