@@ -352,15 +352,24 @@ function pruneRecentProcessedWaMessages() {
 
 function shouldProcessWaMessage(msg) {
   const msgId = msg?.id?._serialized;
-  if (!msgId) return true;
+  const fallbackKey = [
+    msg?.from || "",
+    msg?.to || "",
+    msg?.author || "",
+    msg?.timestamp || "",
+    msg?.type || "",
+    msg?.body || msg?.caption || "",
+    msg?.hasMedia ? "1" : "0"
+  ].join("|");
+  const processingKey = msgId || `fallback:${fallbackKey}`;
 
   pruneRecentProcessedWaMessages();
 
-  if (recentProcessedWaMessages.has(msgId)) {
+  if (recentProcessedWaMessages.has(processingKey)) {
     return false;
   }
 
-  recentProcessedWaMessages.set(msgId, Date.now() + PROCESSED_WA_MESSAGE_TTL_MS);
+  recentProcessedWaMessages.set(processingKey, Date.now() + PROCESSED_WA_MESSAGE_TTL_MS);
   return true;
 }
 
@@ -838,6 +847,107 @@ async function sendMediaToTelegram(topicId, media, caption, replyToMessageId) {
   }
 }
 
+function inferTelegramMediaMimeType(tgMsg) {
+  if (tgMsg.photo) {
+    return "image/jpeg";
+  }
+
+  if (tgMsg.video) {
+    return tgMsg.video.mime_type || "video/mp4";
+  }
+
+  if (tgMsg.audio) {
+    return tgMsg.audio.mime_type || "audio/mpeg";
+  }
+
+  if (tgMsg.voice) {
+    return tgMsg.voice.mime_type || "audio/ogg";
+  }
+
+  if (tgMsg.document) {
+    return tgMsg.document.mime_type || "application/octet-stream";
+  }
+
+  return "application/octet-stream";
+}
+
+function inferTelegramMediaFilename(tgMsg) {
+  if (tgMsg.photo) return "telegram-photo.jpg";
+  if (tgMsg.video) return tgMsg.video.file_name || "telegram-video.mp4";
+  if (tgMsg.audio) return tgMsg.audio.file_name || "telegram-audio.mp3";
+  if (tgMsg.voice) return "telegram-voice.ogg";
+  if (tgMsg.document) return tgMsg.document.file_name || "telegram-document.bin";
+  return "telegram-file.bin";
+}
+
+async function buildWhatsAppMediaFromTelegramMessage(tgMsg) {
+  const fileId = tgMsg.photo?.[tgMsg.photo.length - 1]?.file_id
+    || tgMsg.document?.file_id
+    || tgMsg.video?.file_id
+    || tgMsg.audio?.file_id
+    || tgMsg.voice?.file_id;
+
+  if (!fileId) return null;
+
+  try {
+    const mimeType = inferTelegramMediaMimeType(tgMsg);
+    const filename = inferTelegramMediaFilename(tgMsg);
+
+    const file = await tg.telegram.getFile(fileId);
+    const rawFilePath = String(file.file_path || "");
+    const rawFilePathNoLeadingSlash = rawFilePath.replace(/^\/+/, "");
+    const localDirPrefix = "var/lib/telegram-bot-api/";
+    const localFilePathSuffix = rawFilePathNoLeadingSlash.startsWith(localDirPrefix)
+      ? rawFilePathNoLeadingSlash.slice(localDirPrefix.length)
+      : rawFilePathNoLeadingSlash;
+
+    if (cfg.tgLocalFilesPath && localFilePathSuffix) {
+      const localFilePath = path.resolve(cfg.tgLocalFilesPath, localFilePathSuffix);
+      const localRoot = path.resolve(cfg.tgLocalFilesPath) + path.sep;
+      if (localFilePath.startsWith(localRoot) && fs.existsSync(localFilePath)) {
+        const base64Data = fs.readFileSync(localFilePath).toString("base64");
+        log("debug", "Telegram media loaded from local filesystem", { filePath: localFilePathSuffix });
+        return new MessageMedia(mimeType, base64Data, filename);
+      }
+    }
+
+    // Fallback 1: public Telegram API (works independently from local Bot API filesystem permissions).
+    const publicGetFileRes = await fetch(
+      `https://api.telegram.org/bot${cfg.tgToken}/getFile?file_id=${encodeURIComponent(fileId)}`
+    );
+    if (publicGetFileRes.ok) {
+      const publicGetFileData = await publicGetFileRes.json();
+      const publicFilePath = String(publicGetFileData?.result?.file_path || "").replace(/^\/+/, "");
+      if (publicGetFileData.ok && publicFilePath) {
+        const publicFileUrl = `https://api.telegram.org/file/bot${cfg.tgToken}/${publicFilePath}`;
+        const publicFileRes = await fetch(publicFileUrl);
+        if (publicFileRes.ok) {
+          const publicArrayBuffer = await publicFileRes.arrayBuffer();
+          const publicBase64Data = Buffer.from(publicArrayBuffer).toString("base64");
+          log("debug", "Telegram media downloaded from public API", { filePath: publicFilePath });
+          return new MessageMedia(mimeType, publicBase64Data, filename);
+        }
+      }
+    }
+
+    // Fallback 2: local Bot API HTTP endpoint.
+    const apiBase = cfg.tgApiBaseUrl || "https://api.telegram.org";
+    const fileUrl = `${apiBase}/file/bot${cfg.tgToken}/${localFilePathSuffix}`;
+    const response = await fetch(fileUrl);
+
+    if (!response.ok) {
+      throw new Error(`Telegram file download failed: HTTP ${response.status} for ${localFilePathSuffix}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const base64Data = Buffer.from(arrayBuffer).toString("base64");
+
+    return new MessageMedia(mimeType, base64Data, filename);
+  } catch (error) {
+    throw new Error(`Failed to build WhatsApp media from Telegram message: ${error.message}`);
+  }
+}
+
 async function sendWhatsAppReadReceiptIfEnabled(waGroupId, tgMsg) {
   if (!cfg.tgToWaSendReadReceiptOnActivity) return;
   if (tgMsg.from?.is_bot) return;
@@ -900,6 +1010,7 @@ wa.on("change_state", (state) => {
 tg.on("message", async (ctx) => {
   const tgMsg = ctx.message;
   if (String(tgMsg.chat.id) !== String(cfg.tgGroupId)) return;
+  if (tgMsg.from?.is_bot) return;
 
   const topicId = tgMsg.message_thread_id;
   if (!topicId) return;
@@ -921,17 +1032,7 @@ tg.on("message", async (ctx) => {
     : senderText;
 
   try {
-    let media = null;
-
-    if (tgMsg.photo) {
-      const fileId = tgMsg.photo[tgMsg.photo.length - 1].file_id;
-      const fileUrl = await tg.telegram.getFileLink(fileId);
-      media = await MessageMedia.fromUrl(fileUrl.toString());
-    } else if (tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice) {
-      const file = tgMsg.document || tgMsg.video || tgMsg.audio || tgMsg.voice;
-      const fileUrl = await tg.telegram.getFileLink(file.file_id);
-      media = await MessageMedia.fromUrl(fileUrl.toString());
-    }
+    const media = await buildWhatsAppMediaFromTelegramMessage(tgMsg);
 
     await Promise.all(waGroupIds.map(async (waGroupId) => {
       const quotedMessageId = resolveWhatsAppQuotedMessageId(tgMsg, waGroupId);
@@ -960,6 +1061,13 @@ tg.on("message", async (ctx) => {
 
       if (sentWhatsAppMessage?.id?._serialized && tgMsg.message_id) {
         rememberMessageLink(waGroupId, sentWhatsAppMessage.id._serialized, topicId, tgMsg.message_id, sentWhatsAppMessage.id?.id);
+        log("info", "TG->WA relay success", {
+          topicId,
+          waGroupId,
+          tgMessageId: tgMsg.message_id,
+          hasMedia: Boolean(media),
+          waMessageId: sentWhatsAppMessage.id._serialized
+        });
       }
     }));
   } catch (error) {

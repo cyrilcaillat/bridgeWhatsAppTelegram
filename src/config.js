@@ -19,6 +19,12 @@ function parseOptionalUrl(value) {
   return raw.replace(/\/+$/, "");
 }
 
+function parseOptionalPath(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return raw.replace(/\/+$/, "");
+}
+
 function parseGroupMap(raw) {
   if (!raw || !raw.trim()) return {};
 
@@ -52,6 +58,7 @@ function loadConfig() {
     tgToken: process.env.TG_TOKEN,
     tgGroupId: process.env.TG_GROUP_ID,
     tgApiBaseUrl: parseOptionalUrl(process.env.TG_API_BASE_URL),
+    tgLocalFilesPath: parseOptionalPath(process.env.TG_LOCAL_FILES_PATH),
     bridgeStatePath: process.env.BRIDGE_STATE_PATH || "./bridge-state.json",
     waGroupToTopic: parseGroupMap(process.env.WA_GROUP_IDS || ""),
     messageLinkTtlMs: parseNonNegativeInt(process.env.MESSAGE_LINK_TTL_MS, 7 * 24 * 60 * 60 * 1000),
