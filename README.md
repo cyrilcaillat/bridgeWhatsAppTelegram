@@ -125,7 +125,6 @@ LOG_LEVEL=info
 - `WA_RECONNECT_RETRY_DELAY_MS` (optionnel, defaut `15000`): delai entre deux tentatives de reconnexion
 - `WA_BACKFILL_WINDOW_MS` (optionnel, defaut `86400000`): fenetre temporelle de rattrapage WA au demarrage
 - `WA_BACKFILL_LIMIT` (optionnel, defaut `500`): nombre max de messages WA charges par groupe pendant le backfill
-- `WA_BACKFILL_RETRY_DELAY_MS` (optionnel, defaut `60000`): delai de la deuxieme passe de backfill au demarrage
 - `TG_TO_WA_INCLUDE_PREFIX` (optionnel, defaut `false`): ajoute un prefixe visuel sur les messages Telegram envoyes vers WhatsApp
 - `TG_TO_WA_PREFIX` (optionnel, defaut `[Bridge Telegram]`): texte de prefixe utilise quand `TG_TO_WA_INCLUDE_PREFIX=true`
 - `TG_TO_WA_INCLUDE_USERNAME` (optionnel, defaut `true`): inclut le nom/profil Telegram dans le message WhatsApp relaye

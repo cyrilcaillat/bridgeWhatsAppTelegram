@@ -37,7 +37,6 @@ const WA_RECONNECT_DELAY_MS = cfg.waReconnectDelayMs;
 const WA_RECONNECT_RETRY_DELAY_MS = cfg.waReconnectRetryDelayMs;
 const WA_BACKFILL_WINDOW_MS = cfg.waBackfillWindowMs;
 const WA_BACKFILL_LIMIT = cfg.waBackfillLimit;
-const WA_BACKFILL_RETRY_DELAY_MS = cfg.waBackfillRetryDelayMs;
 const WA_BACKFILL_SEND_DELAY_MS = cfg.waBackfillSendDelayMs;
 const BRIDGE_STATE_PATH = cfg.bridgeStatePath;
 const WA_READY_WAIT_TIMEOUT_MS = Math.max(WA_RECONNECT_DELAY_MS + WA_RECONNECT_RETRY_DELAY_MS + 10000, 30000);

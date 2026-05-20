@@ -68,7 +68,6 @@ function loadConfig() {
     waReconnectRetryDelayMs: parseNonNegativeInt(process.env.WA_RECONNECT_RETRY_DELAY_MS, 15000),
     waBackfillWindowMs: parseNonNegativeInt(process.env.WA_BACKFILL_WINDOW_MS, 24 * 60 * 60 * 1000),
     waBackfillLimit: parseNonNegativeInt(process.env.WA_BACKFILL_LIMIT, 500),
-    waBackfillRetryDelayMs: parseNonNegativeInt(process.env.WA_BACKFILL_RETRY_DELAY_MS, 60 * 1000),
     waBackfillSendDelayMs: parseNonNegativeInt(process.env.WA_BACKFILL_SEND_DELAY_MS, 300),
     tgToWaIncludePrefix: parseBool(process.env.TG_TO_WA_INCLUDE_PREFIX, false),
     tgToWaSendReadReceiptOnActivity: parseBool(process.env.TG_TO_WA_SEND_READ_RECEIPT_ON_ACTIVITY, false),
