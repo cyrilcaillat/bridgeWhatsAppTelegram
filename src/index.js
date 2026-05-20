@@ -403,6 +403,43 @@ function isTelegramPayloadTooLargeError(error) {
   return message.includes("413") || message.toLowerCase().includes("request entity too large");
 }
 
+function isTelegramRetryAfterError(error) {
+  return Number(error?.response?.error_code) === 429 || Number(error?.code) === 429;
+}
+
+function getTelegramRetryDelayMs(error) {
+  const retryAfterSeconds = Number(error?.response?.parameters?.retry_after);
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+    return retryAfterSeconds * 1000;
+  }
+
+  return 1000;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callTelegramWithRetry(action, reason) {
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      if (!isTelegramRetryAfterError(error) || attempt === maxAttempts) {
+        throw error;
+      }
+
+      const delayMs = getTelegramRetryDelayMs(error);
+      log("warn", `Telegram rate limit hit during ${reason}; retrying in ${delayMs}ms (attempt ${attempt}/${maxAttempts})`);
+      await wait(delayMs);
+    }
+  }
+
+  throw new Error(`Telegram retry loop exhausted during ${reason}`);
+}
+
 function scheduleWhatsAppReconnect(reason) {
   if (waReconnectTimer || waReconnectInProgress) {
     log("warn", `WhatsApp reconnect already scheduled/in progress (${reason})`);
@@ -812,11 +849,14 @@ async function refreshWhatsAppGroupsSnapshot() {
 }
 
 async function sendToTelegramTopic(topicId, text, replyToMessageId) {
-  return tg.telegram.sendMessage(cfg.tgGroupId, text, {
-    message_thread_id: topicId,
-    reply_to_message_id: replyToMessageId || undefined,
-    parse_mode: "MarkdownV2"
-  });
+  return callTelegramWithRetry(
+    () => tg.telegram.sendMessage(cfg.tgGroupId, text, {
+      message_thread_id: topicId,
+      reply_to_message_id: replyToMessageId || undefined,
+      parse_mode: "MarkdownV2"
+    }),
+    `send_message:${topicId}`
+  );
 }
 
 async function sendMediaToTelegram(topicId, media, caption, replyToMessageId) {
@@ -834,13 +874,25 @@ async function sendMediaToTelegram(topicId, media, caption, replyToMessageId) {
 
   try {
     if (media.mimetype.startsWith("image/")) {
-      return await tg.telegram.sendPhoto(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await callTelegramWithRetry(
+        () => tg.telegram.sendPhoto(cfg.tgGroupId, Input.fromLocalFile(filePath), opts),
+        `send_photo:${topicId}`
+      );
     } else if (media.mimetype.startsWith("video/")) {
-      return await tg.telegram.sendVideo(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await callTelegramWithRetry(
+        () => tg.telegram.sendVideo(cfg.tgGroupId, Input.fromLocalFile(filePath), opts),
+        `send_video:${topicId}`
+      );
     } else if (media.mimetype.startsWith("audio/") || media.mimetype === "application/ogg") {
-      return await tg.telegram.sendVoice(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await callTelegramWithRetry(
+        () => tg.telegram.sendVoice(cfg.tgGroupId, Input.fromLocalFile(filePath), opts),
+        `send_voice:${topicId}`
+      );
     } else {
-      return await tg.telegram.sendDocument(cfg.tgGroupId, Input.fromLocalFile(filePath), opts);
+      return await callTelegramWithRetry(
+        () => tg.telegram.sendDocument(cfg.tgGroupId, Input.fromLocalFile(filePath), opts),
+        `send_document:${topicId}`
+      );
     }
   } finally {
     fs.rmSync(filePath, { force: true });
@@ -983,10 +1035,17 @@ wa.on("ready", async () => {
     }
   }
 
-  await tg.telegram.sendMessage(
-    cfg.tgGroupId,
-    "Bridge WhatsApp <-> Telegram is running."
-  );
+  try {
+    await callTelegramWithRetry(
+      () => tg.telegram.sendMessage(
+        cfg.tgGroupId,
+        "Bridge WhatsApp <-> Telegram is running."
+      ),
+      "startup_notification"
+    );
+  } catch (error) {
+    log("warn", "Failed to send Telegram startup notification", error.message);
+  }
 });
 
 wa.on("message_create", (msg) => relayWhatsAppMessageToTelegram(msg, "message_create"));
