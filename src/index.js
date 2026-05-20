@@ -823,14 +823,6 @@ async function backfillRecentWhatsAppMessages(passLabel = "initial") {
 
 async function runStartupBackfill() {
   await backfillRecentWhatsAppMessages("initial");
-
-  setTimeout(async () => {
-    try {
-      await backfillRecentWhatsAppMessages("retry_60s");
-    } catch (error) {
-      log("warn", "WhatsApp startup backfill retry failed", error.message);
-    }
-  }, WA_BACKFILL_RETRY_DELAY_MS).unref();
 }
 
 async function refreshWhatsAppGroupsSnapshot() {
@@ -1051,7 +1043,6 @@ wa.on("ready", async () => {
 });
 
 wa.on("message_create", (msg) => relayWhatsAppMessageToTelegram(msg, "message_create"));
-wa.on("message", (msg) => relayWhatsAppMessageToTelegram(msg, "message"));
 wa.on("message_reaction", relayWhatsAppReactionToTelegram);
 wa.on("disconnected", (reason) => {
   log("warn", "WhatsApp disconnected", reason);
