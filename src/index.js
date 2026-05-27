@@ -24,6 +24,7 @@ const topicToWaGroups = Object.entries(cfg.waGroupToTopic).reduce((acc, [waId, t
   return acc;
 }, {});
 const topicCatalog = new Map();
+const waGroupLastMessageAt = new Map();
 const recentBridgeOutboundMessages = new Map();
 const waToTgMessageLinks = new Map();
 const tgToWaMessageLinks = new Map();
@@ -55,6 +56,14 @@ function isNonEmptyString(value) {
 
 function normalizeString(value) {
   return isNonEmptyString(value) ? value.trim() : "";
+}
+
+function normalizeIsoTimestamp(value) {
+  if (!value) return null;
+  const asString = String(value);
+  const parsed = Date.parse(asString);
+  if (!Number.isFinite(parsed)) return null;
+  return new Date(parsed).toISOString();
 }
 
 function readStateFromDisk() {
@@ -89,13 +98,33 @@ function loadState() {
       if (existing) {
         if (entry.name && !existing.name) {
           existing.name = entry.name;
-          topicCatalog.set(key, existing);
           topicsLoaded++;
         }
+
+        const normalizedLastMessageAt = normalizeIsoTimestamp(entry.lastMessageAt);
+        if (normalizedLastMessageAt && existing.lastMessageAt !== normalizedLastMessageAt) {
+          existing.lastMessageAt = normalizedLastMessageAt;
+          topicsLoaded++;
+        }
+
+        topicCatalog.set(key, existing);
       } else {
-        topicCatalog.set(key, { id: key, name: entry.name || null, source: null });
+        topicCatalog.set(key, {
+          id: key,
+          name: entry.name || null,
+          source: null,
+          lastMessageAt: normalizeIsoTimestamp(entry.lastMessageAt)
+        });
         topicsLoaded++;
       }
+    }
+
+    for (const entry of raw.waGroups || []) {
+      const groupId = String(entry?.id || "");
+      if (!groupId) continue;
+      const normalizedLastMessageAt = normalizeIsoTimestamp(entry?.lastMessageAt);
+      if (!normalizedLastMessageAt) continue;
+      waGroupLastMessageAt.set(groupId, normalizedLastMessageAt);
     }
 
     let waUserMappingsLoaded = 0;
@@ -139,12 +168,20 @@ function saveState() {
     }
 
     const topics = Object.fromEntries(
-      [...topicCatalog.entries()].map(([key, entry]) => [key, { id: entry.id, name: entry.name || null }])
+      [...topicCatalog.entries()].map(([key, entry]) => [key, {
+        id: entry.id,
+        name: entry.name || null,
+        lastMessageAt: entry.lastMessageAt || null
+      }])
     );
 
     const data = {
       topics,
-      waGroups: lastWhatsAppGroups.map((g) => ({ name: g.name, id: g.id._serialized })),
+      waGroups: lastWhatsAppGroups.map((g) => ({
+        name: g.name,
+        id: g.id._serialized,
+        lastMessageAt: waGroupLastMessageAt.get(String(g.id._serialized)) || null
+      })),
       waUserMappings: Object.fromEntries(waUserDisplayMap),
       messageLinks: {
         waToTg: Object.fromEntries(waToTgMessageLinks),
@@ -192,7 +229,8 @@ Object.entries(cfg.waGroupToTopic).forEach(([waId, topicId]) => {
   topicCatalog.set(String(topicId), {
     id: String(topicId),
     name: null,
-    source: `configured for ${waId}`
+    source: `configured for ${waId}`,
+    lastMessageAt: null
   });
 });
 
@@ -239,7 +277,8 @@ function upsertTelegramTopic(topicId, name, source) {
     topicCatalog.set(key, {
       id: key,
       name: name || null,
-      source: source || null
+      source: source || null,
+      lastMessageAt: null
     });
     saveState();
     return;
@@ -261,6 +300,67 @@ function upsertTelegramTopic(topicId, name, source) {
     topicCatalog.set(key, existing);
     saveState();
   }
+}
+
+async function resolveWhatsAppGroupName(waGroupId) {
+  try {
+    const chat = await wa.getChatById(waGroupId);
+    if (chat?.name) return chat.name;
+  } catch (error) {
+    log("debug", "Failed to resolve WhatsApp group name", { waGroupId, message: error.message });
+  }
+  return waGroupId.replace("@g.us", "");
+}
+
+async function createTelegramTopicForGroup(waGroupId) {
+  const topicName = await resolveWhatsAppGroupName(waGroupId);
+
+  const result = await callTelegramWithRetry(
+    () => tg.telegram.createForumTopic(cfg.tgGroupId, topicName),
+    `create_topic:${waGroupId}`
+  );
+
+  const newTopicId = result.message_thread_id;
+  log("info", "Auto-created Telegram topic for unmapped WhatsApp group", {
+    waGroupId,
+    topicId: newTopicId,
+    topicName
+  });
+
+  cfg.waGroupToTopic[waGroupId] = newTopicId;
+
+  const key = String(newTopicId);
+  const groups = topicToWaGroups[key] || [];
+  groups.push(waGroupId);
+  topicToWaGroups[key] = groups;
+
+  upsertTelegramTopic(newTopicId, topicName, `auto-created for ${waGroupId}`);
+
+  return newTopicId;
+}
+
+function rememberRecentGroupAndTopicActivity(waGroupId, topicId, timestampMs = Date.now()) {
+  const normalizedTimestamp = new Date(Number.isFinite(timestampMs) ? timestampMs : Date.now()).toISOString();
+  const groupKey = String(waGroupId || "");
+  const topicKey = String(topicId || "");
+
+  let changed = false;
+
+  if (groupKey && waGroupLastMessageAt.get(groupKey) !== normalizedTimestamp) {
+    waGroupLastMessageAt.set(groupKey, normalizedTimestamp);
+    changed = true;
+  }
+
+  if (topicKey) {
+    const existingTopic = topicCatalog.get(topicKey);
+    if (existingTopic && existingTopic.lastMessageAt !== normalizedTimestamp) {
+      existingTopic.lastMessageAt = normalizedTimestamp;
+      topicCatalog.set(topicKey, existingTopic);
+      changed = true;
+    }
+  }
+
+  if (changed) saveState();
 }
 
 function rememberBridgeOutboundMessage(waGroupId, text) {
@@ -678,10 +778,19 @@ async function relayWhatsAppMessageToTelegram(msg, source = "unknown") {
     return;
   }
 
-  const topicId = cfg.waGroupToTopic[waGroupId];
+  let topicId = cfg.waGroupToTopic[waGroupId];
   if (!topicId) {
-    log("debug", "WA->TG skip: group not mapped", { source, waGroupId, ...summarizeWaMessage(msg) });
-    return;
+    try {
+      topicId = await createTelegramTopicForGroup(waGroupId);
+    } catch (error) {
+      log("error", "Failed to auto-create Telegram topic for unmapped group", {
+        source,
+        waGroupId,
+        message: error.message,
+        ...summarizeWaMessage(msg)
+      });
+      return;
+    }
   }
 
   const rawText = msg.body || msg.caption || "";
@@ -690,6 +799,8 @@ async function relayWhatsAppMessageToTelegram(msg, source = "unknown") {
     log("debug", "WA->TG skip: no relayable payload", { source, waGroupId, ...summarizeWaMessage(msg) });
     return;
   }
+
+  rememberRecentGroupAndTopicActivity(waGroupId, topicId, (msg?.timestamp || 0) * 1000 || Date.now());
 
   if (msg.fromMe && isRecentBridgeOutboundMessage(waGroupId, rawText)) {
     log("debug", "WA->TG skip: detected recent bridge outbound echo", { source, waGroupId, ...summarizeWaMessage(msg) });
