@@ -703,8 +703,23 @@ async function relayWhatsAppMessageToTelegram(msg, source = "unknown") {
 
   try {
     const replyToMessageId = await resolveTelegramReplyMessageId(msg);
-    const contact = await msg.getContact();
-    const sender = resolveWhatsAppSenderName(msg, contact);
+    let contact = null;
+    try {
+      if (!msg.fromMe) {
+        contact = await msg.getContact();
+      }
+    } catch (contactError) {
+      log("warn", "WA contact lookup failed, using sender fallback", {
+        source,
+        waGroupId,
+        waMessageId: msg.id?._serialized || null,
+        message: contactError.message
+      });
+    }
+
+    const sender = contact
+      ? resolveWhatsAppSenderName(msg, contact)
+      : (msg.fromMe ? "Me" : (msg.author || msg.from || "Unknown"));
     const safeSender = escapeMarkdownV2(sender.replace("@c.us", ""));
     const safeBody = escapeMarkdownV2(rawText);
     const prefix = `*${safeSender}*`;
