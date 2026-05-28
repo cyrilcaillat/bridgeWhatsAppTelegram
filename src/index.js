@@ -1159,6 +1159,143 @@ async function sendWhatsAppReadReceiptIfEnabled(waGroupId, tgMsg) {
   }
 }
 
+async function relayWhatsAppEditToTelegram(msg, source = "message_edit") {
+  try {
+    const waGroupId = msg.from?.endsWith("@g.us")
+      ? msg.from
+      : (msg.to?.endsWith("@g.us") ? msg.to : null);
+    if (!waGroupId) return;
+
+    const topicId = cfg.waGroupToTopic[waGroupId];
+    if (!topicId) return;
+
+    const waMessageId = msg.id?._serialized;
+    if (!waMessageId) return;
+
+    pruneExpiredMessageLinks();
+    const stableId = extractWaStableMessageId(waMessageId);
+    const link = waToTgMessageLinks.get(buildWaMessageKey(waGroupId, waMessageId))
+      || (stableId ? waToTgMessageLinks.get(buildWaMessageKey(waGroupId, `id:${stableId}`)) : null);
+    if (!link?.tgMessageId) return;
+
+    const newBody = msg.body || "";
+    if (!newBody) return;
+
+    let contact = null;
+    try {
+      if (!msg.fromMe) contact = await msg.getContact();
+    } catch (_) { /* fallback below */ }
+
+    const sender = contact
+      ? resolveWhatsAppSenderName(msg, contact)
+      : (msg.fromMe ? "Me" : (msg.author || msg.from || "Unknown"));
+    const safeSender = escapeMarkdownV2(sender.replace("@c.us", ""));
+    const safeBody = escapeMarkdownV2(newBody);
+    const editedText = `*${safeSender}*\n${safeBody}`;
+
+    await callTelegramWithRetry(
+      () => tg.telegram.editMessageText(
+        cfg.tgGroupId,
+        link.tgMessageId,
+        undefined,
+        editedText,
+        { parse_mode: "MarkdownV2" }
+      ),
+      `edit_message:${topicId}`
+    );
+
+    log("debug", "WA->TG edit relayed", {
+      source,
+      waGroupId,
+      topicId,
+      waMessageId,
+      tgMessageId: link.tgMessageId
+    });
+  } catch (error) {
+    log("warn", "Failed to relay edit from WhatsApp to Telegram", error.message);
+  }
+}
+
+async function relayWhatsAppDeleteToTelegram(msg, revokedMsg) {
+  try {
+    const waGroupId = msg.from?.endsWith("@g.us")
+      ? msg.from
+      : (msg.to?.endsWith("@g.us") ? msg.to : null);
+    if (!waGroupId) return;
+
+    const topicId = cfg.waGroupToTopic[waGroupId];
+    if (!topicId) return;
+
+    const waMessageId = revokedMsg?.id?._serialized || msg.id?._serialized;
+    if (!waMessageId) return;
+
+    pruneExpiredMessageLinks();
+    const stableId = extractWaStableMessageId(waMessageId);
+    const link = waToTgMessageLinks.get(buildWaMessageKey(waGroupId, waMessageId))
+      || (stableId ? waToTgMessageLinks.get(buildWaMessageKey(waGroupId, `id:${stableId}`)) : null);
+    if (!link?.tgMessageId) return;
+
+    await callTelegramWithRetry(
+      () => tg.telegram.deleteMessage(cfg.tgGroupId, link.tgMessageId),
+      `delete_message:${topicId}`
+    );
+
+    log("debug", "WA->TG delete relayed", {
+      waGroupId,
+      topicId,
+      waMessageId,
+      tgMessageId: link.tgMessageId
+    });
+  } catch (error) {
+    log("warn", "Failed to relay delete from WhatsApp to Telegram", error.message);
+  }
+}
+
+async function relayTelegramEditToWhatsApp(ctx) {
+  try {
+    const tgMsg = ctx.update?.edited_message;
+    if (!tgMsg) return;
+    if (String(tgMsg.chat?.id) !== String(cfg.tgGroupId)) return;
+    if (tgMsg.from?.is_bot) return;
+
+    const topicId = tgMsg.message_thread_id;
+    if (!topicId) return;
+
+    const waGroupIds = topicToWaGroups[String(topicId)] || [];
+    if (waGroupIds.length === 0) return;
+
+    pruneExpiredMessageLinks();
+
+    const newText = tgMsg.text || tgMsg.caption || "";
+    if (!newText) return;
+
+    const profileName = [tgMsg.from?.first_name, tgMsg.from?.last_name].filter(Boolean).join(" ").trim();
+    const fromName = profileName || (tgMsg.from?.username ? `@${tgMsg.from.username}` : "Telegram");
+    const editedText = cfg.tgToWaIncludeUsername ? `${fromName}: ${newText}` : newText;
+
+    await Promise.all(waGroupIds.map(async (waGroupId) => {
+      const link = tgToWaMessageLinks.get(buildTgMessageKey(tgMsg.message_id));
+      const links = Array.isArray(link) ? link : (link ? [link] : []);
+      const matchingLink = links.find((entry) => String(entry?.waGroupId) === String(waGroupId));
+      if (!matchingLink?.waMessageId) return;
+
+      await runWithWhatsAppRecovery(
+        () => wa.editMessage(matchingLink.waMessageId, editedText),
+        `relay_edit:${waGroupId}:${tgMsg.message_id}`
+      );
+
+      log("debug", "TG->WA edit relayed", {
+        topicId,
+        waGroupId,
+        tgMessageId: tgMsg.message_id,
+        waMessageId: matchingLink.waMessageId
+      });
+    }));
+  } catch (error) {
+    log("warn", "Failed to relay edit from Telegram to WhatsApp", error.message);
+  }
+}
+
 loadState();
 
 wa.on("qr", (qr) => {
@@ -1194,6 +1331,8 @@ wa.on("ready", async () => {
 
 wa.on("message_create", (msg) => relayWhatsAppMessageToTelegram(msg, "message_create"));
 wa.on("message_reaction", relayWhatsAppReactionToTelegram);
+wa.on("message_edit", (msg) => relayWhatsAppEditToTelegram(msg, "message_edit"));
+wa.on("message_revoke_everyone", (msg, revokedMsg) => relayWhatsAppDeleteToTelegram(msg, revokedMsg));
 wa.on("disconnected", (reason) => {
   log("warn", "WhatsApp disconnected", reason);
   scheduleWhatsAppReconnect(`disconnected: ${reason || "unknown"}`);
@@ -1278,13 +1417,14 @@ tg.on("message", async (ctx) => {
 });
 
 tg.on("message_reaction", relayTelegramReactionToWhatsApp);
+tg.on("edited_message", relayTelegramEditToWhatsApp);
 
 tg.catch((error) => {
   log("error", "Telegram handler error", error.message);
 });
 
 tg.launch({
-  allowedUpdates: ["message", "message_reaction"]
+  allowedUpdates: ["message", "edited_message", "message_reaction"]
 }).catch((error) => {
   log("error", "Telegram initialization failed", error.message);
   process.exitCode = 1;

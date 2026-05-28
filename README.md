@@ -23,6 +23,8 @@ Bridge bidirectionnel entre des groupes WhatsApp et des topics Telegram.
 - Relai WhatsApp -> Telegram
 - Relai Telegram -> WhatsApp
 - Relai des reponses a un message (reply) dans les deux sens
+- Relai des modifications de messages dans les deux sens
+- Relai des suppressions de messages (WhatsApp -> Telegram)
 - Support des medias (photo, video, audio, document)
 - Mapping configurable groupe WhatsApp -> topic Telegram
 - Creation automatique de topic Telegram pour les groupes non mappes
@@ -161,23 +163,6 @@ La liste des groupes WhatsApp detectes et des topics Telegram est conservee dans
 Si un message WhatsApp arrive d'un groupe qui n'est pas encore mappe dans `WA_GROUP_IDS`, le bridge cree automatiquement un topic Telegram avec le nom du groupe WhatsApp et relaie le message.
 
 Le mapping dynamique est conserve en memoire et dans `bridge-state.json` pour les prochains messages.
-
-## Suivi de l'activite (lastMessageAt)
-
-Chaque groupe et topic dans `bridge-state.json` contient un champ `lastMessageAt` (timestamp ISO) mis a jour a chaque message relaye.
-
-Exemple dans `bridge-state.json`:
-
-```json
-{
-  "topics": {
-    "2": { "id": "2", "name": "Los Amigos", "lastMessageAt": "2026-05-28T10:30:00.000Z" }
-  },
-  "waGroups": [
-    { "name": "Los Amigos", "id": "33661312153-1466963472@g.us", "lastMessageAt": "2026-05-28T10:30:00.000Z" }
-  ]
-}
-```
 
 ## Renommage des groupes et topics
 
