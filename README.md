@@ -25,6 +25,10 @@ Bridge bidirectionnel entre des groupes WhatsApp et des topics Telegram.
 - Relai des reponses a un message (reply) dans les deux sens
 - Support des medias (photo, video, audio, document)
 - Mapping configurable groupe WhatsApp -> topic Telegram
+- Creation automatique de topic Telegram pour les groupes non mappes
+- Retry automatique sur rate limit Telegram (429)
+- Suivi de la date de derniere activite par groupe et par topic
+- Renommage manuel des groupes et topics dans `bridge-state.json`
 - Session WhatsApp persistante
 
 ## Prerequis
@@ -125,6 +129,7 @@ LOG_LEVEL=info
 - `WA_RECONNECT_RETRY_DELAY_MS` (optionnel, defaut `15000`): delai entre deux tentatives de reconnexion
 - `WA_BACKFILL_WINDOW_MS` (optionnel, defaut `86400000`): fenetre temporelle de rattrapage WA au demarrage
 - `WA_BACKFILL_LIMIT` (optionnel, defaut `500`): nombre max de messages WA charges par groupe pendant le backfill
+- `WA_BACKFILL_SEND_DELAY_MS` (optionnel, defaut `500`): delai entre chaque envoi pendant le backfill pour eviter les rate limits Telegram
 - `TG_TO_WA_INCLUDE_PREFIX` (optionnel, defaut `false`): ajoute un prefixe visuel sur les messages Telegram envoyes vers WhatsApp
 - `TG_TO_WA_PREFIX` (optionnel, defaut `[Bridge Telegram]`): texte de prefixe utilise quand `TG_TO_WA_INCLUDE_PREFIX=true`
 - `TG_TO_WA_INCLUDE_USERNAME` (optionnel, defaut `true`): inclut le nom/profil Telegram dans le message WhatsApp relaye
@@ -150,6 +155,57 @@ WA_GROUP_IDS=120363123456789012@g.us:101,120363987654321098@g.us:102
 ```
 
 La liste des groupes WhatsApp detectes et des topics Telegram est conservee dans `bridge-state.json`.
+
+## Creation automatique de topics Telegram
+
+Si un message WhatsApp arrive d'un groupe qui n'est pas encore mappe dans `WA_GROUP_IDS`, le bridge cree automatiquement un topic Telegram avec le nom du groupe WhatsApp et relaie le message.
+
+Le mapping dynamique est conserve en memoire et dans `bridge-state.json` pour les prochains messages.
+
+## Suivi de l'activite (lastMessageAt)
+
+Chaque groupe et topic dans `bridge-state.json` contient un champ `lastMessageAt` (timestamp ISO) mis a jour a chaque message relaye.
+
+Exemple dans `bridge-state.json`:
+
+```json
+{
+  "topics": {
+    "2": { "id": "2", "name": "Los Amigos", "lastMessageAt": "2026-05-28T10:30:00.000Z" }
+  },
+  "waGroups": [
+    { "name": "Los Amigos", "id": "33661312153-1466963472@g.us", "lastMessageAt": "2026-05-28T10:30:00.000Z" }
+  ]
+}
+```
+
+## Renommage des groupes et topics
+
+Les noms des groupes et topics peuvent etre modifies manuellement dans `bridge-state.json`, de la meme maniere que `waUserMappings`. Les editions manuelles sont preservees au prochain redemarrage du bridge.
+
+Renommer un groupe:
+
+```bash
+ssh debian@YOUR_SERVER '
+cd /home/debian/bridgeWhatsAppTelegram &&
+jq '"'"'.waGroups |= map(if .id == "YOUR_GROUP_ID@g.us" then .name = "Nouveau Nom" else . end)'"'"' \
+bridge-state.json > bridge-state.tmp &&
+mv bridge-state.tmp bridge-state.json &&
+~/.local/bin/pm2 restart bridge-whatsapp-telegram --update-env
+'
+```
+
+Renommer un topic:
+
+```bash
+ssh debian@YOUR_SERVER '
+cd /home/debian/bridgeWhatsAppTelegram &&
+jq '"'"'.topics["TOPIC_ID"].name = "Nouveau Nom"'"'"' \
+bridge-state.json > bridge-state.tmp &&
+mv bridge-state.tmp bridge-state.json &&
+~/.local/bin/pm2 restart bridge-whatsapp-telegram --update-env
+'
+```
 
 ## Bot API Telegram local (Docker, optionnel)
 
