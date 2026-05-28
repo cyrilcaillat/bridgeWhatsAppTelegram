@@ -25,6 +25,7 @@ const topicToWaGroups = Object.entries(cfg.waGroupToTopic).reduce((acc, [waId, t
 }, {});
 const topicCatalog = new Map();
 const waGroupLastMessageAt = new Map();
+const waGroupNameOverrides = new Map();
 const recentBridgeOutboundMessages = new Map();
 const waToTgMessageLinks = new Map();
 const tgToWaMessageLinks = new Map();
@@ -123,8 +124,9 @@ function loadState() {
       const groupId = String(entry?.id || "");
       if (!groupId) continue;
       const normalizedLastMessageAt = normalizeIsoTimestamp(entry?.lastMessageAt);
-      if (!normalizedLastMessageAt) continue;
-      waGroupLastMessageAt.set(groupId, normalizedLastMessageAt);
+      if (normalizedLastMessageAt) waGroupLastMessageAt.set(groupId, normalizedLastMessageAt);
+      const groupName = normalizeString(entry?.name);
+      if (groupName) waGroupNameOverrides.set(groupId, groupName);
     }
 
     let waUserMappingsLoaded = 0;
@@ -167,6 +169,26 @@ function saveState() {
       waUserDisplayMap.set(jid, displayName);
     }
 
+    // Merge manual topic name edits from disk.
+    for (const [key, diskEntry] of Object.entries(diskState?.parsed?.topics || {})) {
+      const diskName = normalizeString(diskEntry?.name);
+      if (!diskName) continue;
+      const existing = topicCatalog.get(key);
+      if (existing && existing.name !== diskName) {
+        existing.name = diskName;
+        topicCatalog.set(key, existing);
+      }
+    }
+
+    // Merge manual group name edits from disk.
+    for (const diskGroup of diskState?.parsed?.waGroups || []) {
+      const diskGroupId = String(diskGroup?.id || "");
+      const diskGroupName = normalizeString(diskGroup?.name);
+      if (diskGroupId && diskGroupName) {
+        waGroupNameOverrides.set(diskGroupId, diskGroupName);
+      }
+    }
+
     const topics = Object.fromEntries(
       [...topicCatalog.entries()].map(([key, entry]) => [key, {
         id: entry.id,
@@ -177,11 +199,14 @@ function saveState() {
 
     const data = {
       topics,
-      waGroups: lastWhatsAppGroups.map((g) => ({
-        name: g.name,
-        id: g.id._serialized,
-        lastMessageAt: waGroupLastMessageAt.get(String(g.id._serialized)) || null
-      })),
+      waGroups: lastWhatsAppGroups.map((g) => {
+        const groupId = String(g.id._serialized);
+        return {
+          name: waGroupNameOverrides.get(groupId) || g.name,
+          id: groupId,
+          lastMessageAt: waGroupLastMessageAt.get(groupId) || null
+        };
+      }),
       waUserMappings: Object.fromEntries(waUserDisplayMap),
       messageLinks: {
         waToTg: Object.fromEntries(waToTgMessageLinks),
