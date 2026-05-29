@@ -42,10 +42,14 @@ const WA_BACKFILL_LIMIT = cfg.waBackfillLimit;
 const WA_BACKFILL_SEND_DELAY_MS = cfg.waBackfillSendDelayMs;
 const BRIDGE_STATE_PATH = cfg.bridgeStatePath;
 const WA_READY_WAIT_TIMEOUT_MS = Math.max(WA_RECONNECT_DELAY_MS + WA_RECONNECT_RETRY_DELAY_MS + 10000, 30000);
+const WA_WATCHDOG_INTERVAL_MS = cfg.waWatchdogIntervalMs;
 let lastWhatsAppGroups = [];
 let waReconnectTimer = null;
 let waReconnectInProgress = false;
 let loadedStateSignature = null;
+let waWatchdogTimer = null;
+let lastWaEventTimestamp = Date.now();
+const waToTgSendQueues = new Map();
 
 function computeStateSignature(raw) {
   return crypto.createHash("sha1").update(String(raw || "")).digest("hex");
@@ -597,6 +601,61 @@ function scheduleWhatsAppReconnect(reason) {
   }, WA_RECONNECT_DELAY_MS);
 
   waReconnectTimer.unref?.();
+}
+
+function touchWaWatchdog() {
+  lastWaEventTimestamp = Date.now();
+}
+
+function startWaWatchdog() {
+  stopWaWatchdog();
+  if (WA_WATCHDOG_INTERVAL_MS <= 0) return;
+
+  waWatchdogTimer = setInterval(() => {
+    const silenceMs = Date.now() - lastWaEventTimestamp;
+    if (silenceMs >= WA_WATCHDOG_INTERVAL_MS) {
+      log("warn", `WhatsApp watchdog triggered: no WA event for ${Math.round(silenceMs / 1000)}s, forcing reconnect`);
+      touchWaWatchdog();
+      scheduleWhatsAppReconnect("watchdog_timeout");
+    }
+  }, Math.min(WA_WATCHDOG_INTERVAL_MS, 60000));
+  waWatchdogTimer.unref?.();
+  log("info", `WhatsApp watchdog started (interval: ${Math.round(WA_WATCHDOG_INTERVAL_MS / 1000)}s)`);
+}
+
+function stopWaWatchdog() {
+  if (waWatchdogTimer) {
+    clearInterval(waWatchdogTimer);
+    waWatchdogTimer = null;
+  }
+}
+
+function enqueueWaToTgRelay(groupKey, task) {
+  const queue = waToTgSendQueues.get(groupKey) || { running: false, items: [] };
+  waToTgSendQueues.set(groupKey, queue);
+
+  queue.items.push(task);
+
+  if (!queue.running) {
+    queue.running = true;
+    drainWaToTgQueue(groupKey);
+  }
+}
+
+async function drainWaToTgQueue(groupKey) {
+  const queue = waToTgSendQueues.get(groupKey);
+  if (!queue) return;
+
+  while (queue.items.length > 0) {
+    const task = queue.items.shift();
+    try {
+      await task();
+    } catch (error) {
+      log("warn", "Queued WA->TG relay task failed", { groupKey, message: error.message });
+    }
+  }
+
+  queue.running = false;
 }
 
 function waitForWhatsAppReady() {
@@ -1305,6 +1364,8 @@ wa.on("qr", (qr) => {
 
 wa.on("ready", async () => {
   log("info", "WhatsApp client is ready.");
+  touchWaWatchdog();
+  startWaWatchdog();
   try {
     await refreshWhatsAppGroupsSnapshot();
     await runStartupBackfill();
@@ -1329,10 +1390,18 @@ wa.on("ready", async () => {
   }
 });
 
-wa.on("message_create", (msg) => relayWhatsAppMessageToTelegram(msg, "message_create"));
-wa.on("message_reaction", relayWhatsAppReactionToTelegram);
-wa.on("message_edit", (msg) => relayWhatsAppEditToTelegram(msg, "message_edit"));
-wa.on("message_revoke_everyone", (msg, revokedMsg) => relayWhatsAppDeleteToTelegram(msg, revokedMsg));
+wa.on("message_create", (msg) => {
+  touchWaWatchdog();
+  const groupKey = msg.from?.endsWith("@g.us") ? msg.from : (msg.to?.endsWith("@g.us") ? msg.to : null);
+  if (groupKey) {
+    enqueueWaToTgRelay(groupKey, () => relayWhatsAppMessageToTelegram(msg, "message_create"));
+  } else {
+    relayWhatsAppMessageToTelegram(msg, "message_create");
+  }
+});
+wa.on("message_reaction", (reaction) => { touchWaWatchdog(); relayWhatsAppReactionToTelegram(reaction); });
+wa.on("message_edit", (msg) => { touchWaWatchdog(); relayWhatsAppEditToTelegram(msg, "message_edit"); });
+wa.on("message_revoke_everyone", (msg, revokedMsg) => { touchWaWatchdog(); relayWhatsAppDeleteToTelegram(msg, revokedMsg); });
 wa.on("disconnected", (reason) => {
   log("warn", "WhatsApp disconnected", reason);
   scheduleWhatsAppReconnect(`disconnected: ${reason || "unknown"}`);

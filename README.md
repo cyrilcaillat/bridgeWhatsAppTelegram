@@ -29,6 +29,8 @@ Bridge bidirectionnel entre des groupes WhatsApp et des topics Telegram.
 - Mapping configurable groupe WhatsApp -> topic Telegram
 - Creation automatique de topic Telegram pour les groupes non mappes
 - Retry automatique sur rate limit Telegram (429)
+- Watchdog WhatsApp avec reconnexion automatique en cas d'inactivite
+- File d'attente sequentielle par groupe pour conserver l'ordre chronologique
 - Suivi de la date de derniere activite par groupe et par topic
 - Renommage manuel des groupes et topics dans `bridge-state.json`
 - Session WhatsApp persistante
@@ -132,6 +134,7 @@ LOG_LEVEL=info
 - `WA_BACKFILL_WINDOW_MS` (optionnel, defaut `86400000`): fenetre temporelle de rattrapage WA au demarrage
 - `WA_BACKFILL_LIMIT` (optionnel, defaut `500`): nombre max de messages WA charges par groupe pendant le backfill
 - `WA_BACKFILL_SEND_DELAY_MS` (optionnel, defaut `500`): delai entre chaque envoi pendant le backfill pour eviter les rate limits Telegram
+- `WA_WATCHDOG_INTERVAL_MS` (optionnel, defaut `900000` / 15 min): duree d'inactivite WhatsApp avant reconnexion automatique (0 pour desactiver)
 - `TG_TO_WA_INCLUDE_PREFIX` (optionnel, defaut `false`): ajoute un prefixe visuel sur les messages Telegram envoyes vers WhatsApp
 - `TG_TO_WA_PREFIX` (optionnel, defaut `[Bridge Telegram]`): texte de prefixe utilise quand `TG_TO_WA_INCLUDE_PREFIX=true`
 - `TG_TO_WA_INCLUDE_USERNAME` (optionnel, defaut `true`): inclut le nom/profil Telegram dans le message WhatsApp relaye
