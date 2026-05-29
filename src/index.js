@@ -341,6 +341,32 @@ async function resolveWhatsAppGroupName(waGroupId) {
   return waGroupId.replace("@g.us", "");
 }
 
+function persistWaGroupIdsToEnv() {
+  try {
+    const envPath = path.resolve(process.cwd(), ".env");
+    if (!fs.existsSync(envPath)) {
+      log("warn", "Cannot persist WA_GROUP_IDS: .env file not found");
+      return;
+    }
+
+    const newValue = Object.entries(cfg.waGroupToTopic)
+      .map(([waId, topicId]) => `${waId}:${topicId}`)
+      .join(",");
+
+    const envContent = fs.readFileSync(envPath, "utf8");
+    const waGroupIdsRegex = /^WA_GROUP_IDS=.*/m;
+
+    const updatedContent = waGroupIdsRegex.test(envContent)
+      ? envContent.replace(waGroupIdsRegex, `WA_GROUP_IDS=${newValue}`)
+      : `${envContent.trimEnd()}\nWA_GROUP_IDS=${newValue}\n`;
+
+    fs.writeFileSync(envPath, updatedContent, "utf8");
+    log("info", "WA_GROUP_IDS persisted to .env", { value: newValue });
+  } catch (error) {
+    log("warn", "Failed to persist WA_GROUP_IDS to .env", error.message);
+  }
+}
+
 async function createTelegramTopicForGroup(waGroupId) {
   const topicName = await resolveWhatsAppGroupName(waGroupId);
 
@@ -364,6 +390,7 @@ async function createTelegramTopicForGroup(waGroupId) {
   topicToWaGroups[key] = groups;
 
   upsertTelegramTopic(newTopicId, topicName, `auto-created for ${waGroupId}`);
+  persistWaGroupIdsToEnv();
 
   return newTopicId;
 }
