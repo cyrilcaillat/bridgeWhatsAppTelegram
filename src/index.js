@@ -1432,16 +1432,18 @@ wa.on("ready", async () => {
     }
   }
 
-  try {
-    await callTelegramWithRetry(
-      () => tg.telegram.sendMessage(
-        cfg.tgGroupId,
-        "Bridge WhatsApp <-> Telegram is running."
-      ),
-      "startup_notification"
-    );
-  } catch (error) {
-    log("warn", "Failed to send Telegram startup notification", error.message);
+  if (cfg.tgStartupNotification) {
+    try {
+      await callTelegramWithRetry(
+        () => tg.telegram.sendMessage(
+          cfg.tgGroupId,
+          "Bridge WhatsApp <-> Telegram is running."
+        ),
+        "startup_notification"
+      );
+    } catch (error) {
+      log("warn", "Failed to send Telegram startup notification", error.message);
+    }
   }
 });
 

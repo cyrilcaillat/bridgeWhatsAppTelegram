@@ -139,6 +139,7 @@ LOG_LEVEL=info
 - `TG_TO_WA_PREFIX` (optionnel, defaut `[Bridge Telegram]`): texte de prefixe utilise quand `TG_TO_WA_INCLUDE_PREFIX=true`
 - `TG_TO_WA_INCLUDE_USERNAME` (optionnel, defaut `true`): inclut le nom/profil Telegram dans le message WhatsApp relaye
 - `TG_TO_WA_SEND_READ_RECEIPT_ON_ACTIVITY` (optionnel, defaut `false`): envoie un accuse de lecture WhatsApp (`seen`) lorsqu'il y a une activite Telegram dans un topic mappe
+- `TG_STARTUP_NOTIFICATION` (optionnel, defaut `true`): envoie un message Telegram au demarrage du bridge (`false` pour desactiver)
 - `PUPPETEER_EXECUTABLE_PATH` (optionnel): chemin vers Chrome/Chromium
 - `HEADLESS` (optionnel, defaut `true`): execution headless du navigateur WhatsApp Web
 - `LOG_LEVEL` (optionnel, defaut `info`): niveau de logs (`error`, `warn`, `info`, `debug`)
