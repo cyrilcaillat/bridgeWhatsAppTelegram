@@ -268,7 +268,17 @@ const wa = new Client({
   puppeteer: {
     headless: cfg.headless,
     executablePath: cfg.puppeteerExecutablePath,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"]
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+      "--disable-features=IsolateOrigins,site-per-process,TranslateUI",
+      "--disable-blink-features=AutomationControlled",
+      "--no-first-run"
+    ]
   }
 });
 
@@ -638,16 +648,34 @@ function startWaWatchdog() {
   stopWaWatchdog();
   if (WA_WATCHDOG_INTERVAL_MS <= 0) return;
 
-  waWatchdogTimer = setInterval(() => {
+  const pingIntervalMs = Math.min(WA_WATCHDOG_INTERVAL_MS, 120000);
+
+  waWatchdogTimer = setInterval(async () => {
     const silenceMs = Date.now() - lastWaEventTimestamp;
     if (silenceMs >= WA_WATCHDOG_INTERVAL_MS) {
       log("warn", `WhatsApp watchdog triggered: no WA event for ${Math.round(silenceMs / 1000)}s, forcing reconnect`);
       touchWaWatchdog();
       scheduleWhatsAppReconnect("watchdog_timeout");
+      return;
     }
-  }, Math.min(WA_WATCHDOG_INTERVAL_MS, 60000));
+
+    try {
+      const page = wa.pupPage;
+      if (!page || page.isClosed?.()) {
+        log("warn", "WhatsApp watchdog: pupPage is closed, forcing reconnect");
+        touchWaWatchdog();
+        scheduleWhatsAppReconnect("watchdog_page_closed");
+        return;
+      }
+      await page.evaluate("Date.now()");
+    } catch (error) {
+      log("warn", "WhatsApp watchdog: page health check failed, forcing reconnect", error.message);
+      touchWaWatchdog();
+      scheduleWhatsAppReconnect("watchdog_page_unresponsive");
+    }
+  }, pingIntervalMs);
   waWatchdogTimer.unref?.();
-  log("info", `WhatsApp watchdog started (interval: ${Math.round(WA_WATCHDOG_INTERVAL_MS / 1000)}s)`);
+  log("info", `WhatsApp watchdog started (silence threshold: ${Math.round(WA_WATCHDOG_INTERVAL_MS / 1000)}s, health check every ${Math.round(pingIntervalMs / 1000)}s)`);
 }
 
 function stopWaWatchdog() {
