@@ -348,7 +348,20 @@ async function resolveWhatsAppGroupName(waGroupId) {
   } catch (error) {
     log("debug", "Failed to resolve WhatsApp group name", { waGroupId, message: error.message });
   }
-  return waGroupId.replace("@g.us", "");
+  return waGroupId.replace("@g.us", "").replace("@c.us", "");
+}
+
+function isRelayableWaJid(jid) {
+  if (!jid || typeof jid !== "string") return false;
+  if (jid.endsWith("@g.us")) return true;
+  if (jid.endsWith("@c.us") && cfg.waDmMode === "all") return true;
+  return false;
+}
+
+function extractRelayableChatId(msg) {
+  if (isRelayableWaJid(msg?.from)) return msg.from;
+  if (isRelayableWaJid(msg?.to)) return msg.to;
+  return null;
 }
 
 function persistWaGroupIdsToEnv() {
@@ -787,9 +800,7 @@ function rememberMessageLink(waGroupId, waMessageId, topicId, tgMessageId, waSta
 async function resolveTelegramReplyMessageId(msg) {
   if (!msg.hasQuotedMsg) return null;
 
-  const waGroupId = msg.from?.endsWith("@g.us")
-    ? msg.from
-    : (msg.to?.endsWith("@g.us") ? msg.to : null);
+  const waGroupId = extractRelayableChatId(msg);
   if (!waGroupId) return null;
 
   try {
@@ -829,7 +840,7 @@ function extractWaGroupIdFromSerializedMessageId(serializedId) {
   const parts = String(serializedId).split("_");
   if (parts.length < 2) return null;
   const maybeGroupId = parts[1];
-  return maybeGroupId.endsWith("@g.us") ? maybeGroupId : null;
+  return isRelayableWaJid(maybeGroupId) ? maybeGroupId : null;
 }
 
 function extractWaMessageInfoFromReaction(reaction) {
@@ -856,7 +867,7 @@ async function relayWhatsAppReactionToTelegram(reaction) {
   try {
     const { waGroupId, waMessageId } = extractWaMessageInfoFromReaction(reaction);
     if (!waGroupId || !waMessageId) return;
-    if (!waGroupId.endsWith("@g.us")) return;
+    if (!isRelayableWaJid(waGroupId)) return;
 
     const topicId = cfg.waGroupToTopic[waGroupId];
     if (!topicId) return;
@@ -909,9 +920,7 @@ async function relayTelegramReactionToWhatsApp(ctx) {
 async function relayWhatsAppMessageToTelegram(msg, source = "unknown") {
   log("debug", "WA->TG event received", { source, ...summarizeWaMessage(msg) });
 
-  const waGroupId = msg.from?.endsWith("@g.us")
-    ? msg.from
-    : (msg.to?.endsWith("@g.us") ? msg.to : null);
+  const waGroupId = extractRelayableChatId(msg);
   if (!waGroupId) {
     log("debug", "WA->TG skip: message is not tied to a mapped group", { source, ...summarizeWaMessage(msg) });
     return;
@@ -1275,9 +1284,7 @@ async function sendWhatsAppReadReceiptIfEnabled(waGroupId, tgMsg) {
 
 async function relayWhatsAppEditToTelegram(msg, source = "message_edit") {
   try {
-    const waGroupId = msg.from?.endsWith("@g.us")
-      ? msg.from
-      : (msg.to?.endsWith("@g.us") ? msg.to : null);
+    const waGroupId = extractRelayableChatId(msg);
     if (!waGroupId) return;
 
     const topicId = cfg.waGroupToTopic[waGroupId];
@@ -1332,9 +1339,7 @@ async function relayWhatsAppEditToTelegram(msg, source = "message_edit") {
 
 async function relayWhatsAppDeleteToTelegram(msg, revokedMsg) {
   try {
-    const waGroupId = msg.from?.endsWith("@g.us")
-      ? msg.from
-      : (msg.to?.endsWith("@g.us") ? msg.to : null);
+    const waGroupId = extractRelayableChatId(msg);
     if (!waGroupId) return;
 
     const topicId = cfg.waGroupToTopic[waGroupId];
@@ -1449,7 +1454,7 @@ wa.on("ready", async () => {
 
 wa.on("message_create", (msg) => {
   touchWaWatchdog();
-  const groupKey = msg.from?.endsWith("@g.us") ? msg.from : (msg.to?.endsWith("@g.us") ? msg.to : null);
+  const groupKey = extractRelayableChatId(msg);
   if (groupKey) {
     enqueueWaToTgRelay(groupKey, () => relayWhatsAppMessageToTelegram(msg, "message_create"));
   } else {

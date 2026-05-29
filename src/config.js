@@ -75,6 +75,9 @@ function loadConfig() {
     tgToWaPrefix: process.env.TG_TO_WA_PREFIX || "[Bridge Telegram]",
     tgToWaIncludeUsername: parseBool(process.env.TG_TO_WA_INCLUDE_USERNAME, true),
     tgStartupNotification: parseBool(process.env.TG_STARTUP_NOTIFICATION, true),
+    waDmMode: ["off", "all"].includes(String(process.env.WA_DM_MODE || "").toLowerCase())
+      ? String(process.env.WA_DM_MODE).toLowerCase()
+      : "off",
     puppeteerExecutablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     headless: parseBool(process.env.HEADLESS, true),
     logLevel: (process.env.LOG_LEVEL || "info").toLowerCase()
