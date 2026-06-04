@@ -1,6 +1,6 @@
 "use strict";
 
-require("dotenv").config();
+require("dotenv").config({ override: true });
 
 const fs = require("node:fs");
 const os = require("node:os");
