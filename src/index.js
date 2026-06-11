@@ -1645,28 +1645,32 @@ process.once("SIGTERM", () => {
   tg.stop("SIGTERM");
 });
 
+// Clean up any chromium processes left over from a previous run (pm2 restart
+// does not kill detached child processes) and remove session lock files
+// before initializing WhatsApp Web.
+cleanupOrphanChromiumSync();
+
 wa.initialize().catch((error) => {
   log("error", "WhatsApp initialization failed", error.message);
   scheduleWhatsAppReconnect("initialization_failure");
 });
 
-// Clean up chromium processes left over from a previous run (e.g. after
-// pm2 restart which does not kill detached child processes), then retry
-// initialization if the first attempt got stuck on the session lock.
-killOrphanChromiumProcessesAtBoot();
-
-function killOrphanChromiumProcessesAtBoot() {
-  const sessionLockPath = path.resolve(process.cwd(), ".session", "session", "SingletonLock");
-  setTimeout(async () => {
-    if (wa.pupPage) return; // initialization succeeded
-
-    log("warn", "WhatsApp init seems stuck; cleaning orphan chromium processes and session lock");
-    await killOrphanChromiumProcesses();
-    try {
-      fs.rmSync(sessionLockPath, { force: true });
-    } catch (error) {
-      log("debug", "Session lock cleanup failed", error.message);
+function cleanupOrphanChromiumSync() {
+  const { execFileSync } = require("node:child_process");
+  const sessionPath = path.resolve(process.cwd(), ".session");
+  try {
+    execFileSync("pkill", ["-f", sessionPath], { stdio: "ignore" });
+    log("info", "Orphan chromium processes killed at boot");
+  } catch (error) {
+    if (error.status && error.status !== 1) {
+      log("warn", "Boot orphan cleanup failed", error.message);
     }
-    scheduleWhatsAppReconnect("boot_stuck_cleanup");
-  }, 90000).unref?.();
+  }
+  try {
+    fs.rmSync(path.resolve(sessionPath, "session", "SingletonLock"), { force: true });
+    fs.rmSync(path.resolve(sessionPath, "session", "SingletonCookie"), { force: true });
+    fs.rmSync(path.resolve(sessionPath, "session", "SingletonSocket"), { force: true });
+  } catch (error) {
+    log("debug", "Boot session lock cleanup failed", error.message);
+  }
 }
