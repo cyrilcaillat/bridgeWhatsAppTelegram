@@ -56,6 +56,21 @@ function computeStateSignature(raw) {
   return crypto.createHash("sha1").update(String(raw || "")).digest("hex");
 }
 
+function registerGroupTopicMapping(waGroupId, topicId) {
+  const previousTopicId = cfg.waGroupToTopic[waGroupId];
+  if (previousTopicId && previousTopicId !== topicId) {
+    const prevKey = String(previousTopicId);
+    topicToWaGroups[prevKey] = (topicToWaGroups[prevKey] || []).filter((id) => id !== waGroupId);
+  }
+
+  cfg.waGroupToTopic[waGroupId] = topicId;
+
+  const key = String(topicId);
+  const groups = topicToWaGroups[key] || [];
+  if (!groups.includes(waGroupId)) groups.push(waGroupId);
+  topicToWaGroups[key] = groups;
+}
+
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -132,6 +147,10 @@ function loadState() {
       if (normalizedLastMessageAt) waGroupLastMessageAt.set(groupId, normalizedLastMessageAt);
       const groupName = normalizeString(entry?.name);
       if (groupName) waGroupNameOverrides.set(groupId, groupName);
+      const topicId = Number(entry?.topicId);
+      if (Number.isInteger(topicId) && topicId > 0) {
+        registerGroupTopicMapping(groupId, topicId);
+      }
     }
 
     let waUserMappingsLoaded = 0;
@@ -185,12 +204,17 @@ function saveState() {
       }
     }
 
-    // Merge manual group name edits from disk.
+    // Merge manual group name and topic mapping edits from disk.
     for (const diskGroup of diskState?.parsed?.waGroups || []) {
       const diskGroupId = String(diskGroup?.id || "");
+      if (!diskGroupId) continue;
       const diskGroupName = normalizeString(diskGroup?.name);
-      if (diskGroupId && diskGroupName) {
+      if (diskGroupName) {
         waGroupNameOverrides.set(diskGroupId, diskGroupName);
+      }
+      const diskTopicId = Number(diskGroup?.topicId);
+      if (Number.isInteger(diskTopicId) && diskTopicId > 0 && cfg.waGroupToTopic[diskGroupId] !== diskTopicId) {
+        registerGroupTopicMapping(diskGroupId, diskTopicId);
       }
     }
 
@@ -202,6 +226,10 @@ function saveState() {
       }])
     );
 
+    const snapshotGroupIds = new Set(lastWhatsAppGroups.map((g) => String(g.id._serialized)));
+    const mappedIdsNotInSnapshot = Object.keys(cfg.waGroupToTopic)
+      .filter((groupId) => !snapshotGroupIds.has(groupId));
+
     const data = {
       topics,
       waGroups: lastWhatsAppGroups.map((g) => {
@@ -209,9 +237,15 @@ function saveState() {
         return {
           name: waGroupNameOverrides.get(groupId) || g.name,
           id: groupId,
+          topicId: cfg.waGroupToTopic[groupId] || null,
           lastMessageAt: waGroupLastMessageAt.get(groupId) || null
         };
-      }),
+      }).concat(mappedIdsNotInSnapshot.map((groupId) => ({
+        name: waGroupNameOverrides.get(groupId) || null,
+        id: groupId,
+        topicId: cfg.waGroupToTopic[groupId],
+        lastMessageAt: waGroupLastMessageAt.get(groupId) || null
+      }))),
       waUserMappings: Object.fromEntries(waUserDisplayMap),
       messageLinks: {
         waToTg: Object.fromEntries(waToTgMessageLinks),
@@ -365,32 +399,6 @@ function extractRelayableChatId(msg) {
   return null;
 }
 
-function persistWaGroupIdsToEnv() {
-  try {
-    const envPath = path.resolve(process.cwd(), ".env");
-    if (!fs.existsSync(envPath)) {
-      log("warn", "Cannot persist WA_GROUP_IDS: .env file not found");
-      return;
-    }
-
-    const newValue = Object.entries(cfg.waGroupToTopic)
-      .map(([waId, topicId]) => `${waId}:${topicId}`)
-      .join(",");
-
-    const envContent = fs.readFileSync(envPath, "utf8");
-    const waGroupIdsRegex = /^WA_GROUP_IDS=.*/m;
-
-    const updatedContent = waGroupIdsRegex.test(envContent)
-      ? envContent.replace(waGroupIdsRegex, `WA_GROUP_IDS=${newValue}`)
-      : `${envContent.trimEnd()}\nWA_GROUP_IDS=${newValue}\n`;
-
-    fs.writeFileSync(envPath, updatedContent, "utf8");
-    log("info", "WA_GROUP_IDS persisted to .env", { value: newValue });
-  } catch (error) {
-    log("warn", "Failed to persist WA_GROUP_IDS to .env", error.message);
-  }
-}
-
 async function createTelegramTopicForGroup(waGroupId) {
   const topicName = await resolveWhatsAppGroupName(waGroupId);
 
@@ -406,15 +414,10 @@ async function createTelegramTopicForGroup(waGroupId) {
     topicName
   });
 
-  cfg.waGroupToTopic[waGroupId] = newTopicId;
-
-  const key = String(newTopicId);
-  const groups = topicToWaGroups[key] || [];
-  groups.push(waGroupId);
-  topicToWaGroups[key] = groups;
+  registerGroupTopicMapping(waGroupId, newTopicId);
 
   upsertTelegramTopic(newTopicId, topicName, `auto-created for ${waGroupId}`);
-  persistWaGroupIdsToEnv();
+  saveState();
 
   return newTopicId;
 }

@@ -122,9 +122,10 @@ LOG_LEVEL=info
 - `TG_TOKEN` (obligatoire): token du bot Telegram
 - `TG_GROUP_ID` (obligatoire): identifiant du supergroupe Telegram
 - `TG_API_BASE_URL` (optionnel): URL de base d'un serveur Bot API Telegram local (ex: `http://127.0.0.1:8081`)
-- `WA_GROUP_IDS` (optionnel mais recommande): correspondances groupe WhatsApp -> topic Telegram
+- `WA_GROUP_IDS` (optionnel): correspondances initiales groupe WhatsApp -> topic Telegram (bootstrap)
   - Format: `WA_GROUP_ID:TG_TOPIC_ID`
   - Entrees separees par des virgules
+  - Apres le premier demarrage, le mapping de reference est conserve dans `bridge-state.json` (`waGroups[].topicId`) qui prime sur `.env`
 - `BRIDGE_STATE_PATH` (optionnel, defaut `./bridge-state.json`): chemin du fichier d'etat interne
 - `MESSAGE_LINK_TTL_MS` (optionnel, defaut `604800000`): duree de conservation des liens de messages WA<->TG
 - `PROCESSED_WA_MESSAGE_TTL_MS` (optionnel, defaut `300000`): anti-duplication des evenements WA
@@ -165,9 +166,21 @@ La liste des groupes WhatsApp detectes et des topics Telegram est conservee dans
 
 ## Creation automatique de topics Telegram
 
-Si un message WhatsApp arrive d'un groupe qui n'est pas encore mappe dans `WA_GROUP_IDS`, le bridge cree automatiquement un topic Telegram avec le nom du groupe WhatsApp et relaie le message.
+Si un message WhatsApp arrive d'un groupe qui n'est pas encore mappe, le bridge cree automatiquement un topic Telegram avec le nom du groupe WhatsApp et relaie le message.
 
-Le mapping dynamique est conserve en memoire et dans `bridge-state.json` pour les prochains messages.
+Le mapping groupe -> topic est conserve dans `bridge-state.json`, dans `waGroups[].topicId`. Ce fichier est la source de reference du mapping: les valeurs de `WA_GROUP_IDS` du `.env` ne servent que de bootstrap initial.
+
+Pour remapper un groupe vers un autre topic, editer `topicId` directement dans `bridge-state.json`:
+
+```bash
+ssh debian@YOUR_SERVER '
+cd /home/debian/bridgeWhatsAppTelegram &&
+jq '"'"'.waGroups |= map(if .id == "YOUR_GROUP_ID@g.us" then .topicId = 42 else . end)'"'"' \
+bridge-state.json > bridge-state.tmp &&
+mv bridge-state.tmp bridge-state.json &&
+~/.local/bin/pm2 restart bridge-whatsapp-telegram --update-env
+'
+```
 
 ## Renommage des groupes et topics
 
