@@ -1135,6 +1135,53 @@ async function refreshWhatsAppGroupsSnapshot() {
   log("info", "WhatsApp groups state updated in bridge-state.json");
 }
 
+async function populateWaUserMappingsFromGroups() {
+  let added = 0;
+  let resolved = 0;
+
+  for (const waGroupId of Object.keys(cfg.waGroupToTopic)) {
+    if (!waGroupId.endsWith("@g.us")) continue;
+
+    let chat;
+    try {
+      chat = await wa.getChatById(waGroupId);
+    } catch (error) {
+      log("debug", "User mapping scan: failed to load group", { waGroupId, message: error.message });
+      continue;
+    }
+
+    const participants = chat?.participants || chat?.groupMetadata?.participants || [];
+    for (const participant of participants) {
+      const jid = participant?.id?._serialized;
+      if (!jid) continue;
+
+      const existing = normalizeString(waUserDisplayMap.get(jid));
+      if (existing && !isWaNoneMapping(existing)) continue;
+
+      let displayName = "";
+      try {
+        const contact = await wa.getContactById(jid);
+        displayName = normalizeString(contact?.pushname || contact?.name || "");
+      } catch (error) {
+        log("debug", "User mapping scan: contact lookup failed", { jid, message: error.message });
+      }
+
+      if (displayName) {
+        waUserDisplayMap.set(jid, displayName);
+        resolved++;
+      } else if (!existing) {
+        waUserDisplayMap.set(jid, WA_USER_MAPPING_NONE);
+        added++;
+      }
+    }
+  }
+
+  if (resolved > 0 || added > 0) {
+    saveState();
+  }
+  log("info", `WA user mappings scan completed (${resolved} resolved, ${added} unresolved tracked)`);
+}
+
 async function sendToTelegramTopic(topicId, text, replyToMessageId) {
   return callTelegramWithRetry(
     () => tg.telegram.sendMessage(cfg.tgGroupId, text, {
@@ -1449,6 +1496,7 @@ wa.on("ready", async () => {
   try {
     await refreshWhatsAppGroupsSnapshot();
     await runStartupBackfill();
+    await populateWaUserMappingsFromGroups();
   } catch (error) {
     if (isDetachedFrameError(error)) {
       log("warn", "WhatsApp groups snapshot skipped because browser frame was reloaded");
