@@ -1638,12 +1638,27 @@ tg.launch({
 });
 
 process.once("SIGINT", () => {
-  tg.stop("SIGINT");
+  shutdownBridge("SIGINT");
 });
 
 process.once("SIGTERM", () => {
-  tg.stop("SIGTERM");
+  shutdownBridge("SIGTERM");
 });
+
+function shutdownBridge(signal) {
+  log("info", `Received ${signal}, shutting down bridge`);
+  try {
+    tg.stop(signal);
+  } catch (error) {
+    log("debug", "Telegram stop on shutdown failed", error.message);
+  }
+  // Use destroy().finally() so we always run the chromium cleanup even
+  // if WhatsApp tear-down throws.
+  Promise.resolve(wa.destroy().catch(() => undefined)).finally(() => {
+    cleanupOrphanChromiumSync();
+    process.exit(0);
+  });
+}
 
 // Clean up any chromium processes left over from a previous run (pm2 restart
 // does not kill detached child processes) and remove session lock files
