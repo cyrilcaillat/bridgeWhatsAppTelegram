@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { execFile } = require("node:child_process");
 const qrcode = require("qrcode-terminal");
 const { Telegraf, Input } = require("telegraf");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
@@ -619,6 +620,23 @@ async function callTelegramWithRetry(action, reason) {
   throw new Error(`Telegram retry loop exhausted during ${reason}`);
 }
 
+function killOrphanChromiumProcesses() {
+  return new Promise((resolve) => {
+    // Only target chromium processes using this bridge's session directory
+    // to avoid killing unrelated browser processes on the host.
+    const sessionPath = path.resolve(process.cwd(), ".session");
+    execFile("pkill", ["-f", sessionPath], (error) => {
+      // pkill exits 1 when no process matched: not an error for us.
+      if (error && error.code !== 1) {
+        log("warn", "Orphan chromium cleanup failed", error.message);
+      } else if (!error) {
+        log("info", "Orphan chromium processes killed before WhatsApp reinit");
+      }
+      resolve();
+    });
+  });
+}
+
 function scheduleWhatsAppReconnect(reason) {
   if (waReconnectTimer || waReconnectInProgress) {
     log("warn", `WhatsApp reconnect already scheduled/in progress (${reason})`);
@@ -633,6 +651,8 @@ function scheduleWhatsAppReconnect(reason) {
     try {
       log("warn", `Reinitializing WhatsApp client (${reason})`);
       await wa.destroy().catch(() => undefined);
+      await killOrphanChromiumProcesses();
+      await new Promise((r) => setTimeout(r, 2000));
       await wa.initialize();
     } catch (error) {
       log("error", "WhatsApp reinitialization failed", error.message);
