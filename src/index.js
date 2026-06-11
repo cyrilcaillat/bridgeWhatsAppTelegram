@@ -655,6 +655,11 @@ function scheduleWhatsAppReconnect(reason) {
       log("warn", `Reinitializing WhatsApp client (${reason})`);
       await wa.destroy().catch(() => undefined);
       await killOrphanChromiumProcesses();
+      try {
+        fs.rmSync(path.resolve(process.cwd(), ".session", "session", "SingletonLock"), { force: true });
+      } catch (lockError) {
+        log("debug", "Session lock cleanup failed", lockError.message);
+      }
       await new Promise((r) => setTimeout(r, 2000));
       await wa.initialize();
     } catch (error) {
@@ -1644,3 +1649,24 @@ wa.initialize().catch((error) => {
   log("error", "WhatsApp initialization failed", error.message);
   scheduleWhatsAppReconnect("initialization_failure");
 });
+
+// Clean up chromium processes left over from a previous run (e.g. after
+// pm2 restart which does not kill detached child processes), then retry
+// initialization if the first attempt got stuck on the session lock.
+killOrphanChromiumProcessesAtBoot();
+
+function killOrphanChromiumProcessesAtBoot() {
+  const sessionLockPath = path.resolve(process.cwd(), ".session", "session", "SingletonLock");
+  setTimeout(async () => {
+    if (wa.pupPage) return; // initialization succeeded
+
+    log("warn", "WhatsApp init seems stuck; cleaning orphan chromium processes and session lock");
+    await killOrphanChromiumProcesses();
+    try {
+      fs.rmSync(sessionLockPath, { force: true });
+    } catch (error) {
+      log("debug", "Session lock cleanup failed", error.message);
+    }
+    scheduleWhatsAppReconnect("boot_stuck_cleanup");
+  }, 90000).unref?.();
+}
